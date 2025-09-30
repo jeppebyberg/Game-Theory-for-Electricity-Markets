@@ -94,11 +94,13 @@ class EPEC:
                 alpha_history[iter][i] = self.model.alpha.value
                 dispatch_history[iter] = [self.model.P_G[i].value for i in self.model.n_gen]
                 clearing_price_SP = self.model.lambda_dual.value
-                clearing_price_history.append(clearing_price_SP)
+
                     
                 if iter > 0:
                     if profit_history[iter][i] >= (1 - self.convergence_tol) * profit_history[iter - 1][i] and profit_history[iter][i] <= (1 + self.convergence_tol) * profit_history[iter - 1][i]:
                         convergence_check[iter][i] = True
+
+            clearing_price_history.append(clearing_price_SP)
 
             if all(convergence_check[iter]):
                 print(f"Run id: {run_id} - Converged after {iter} iterations.")
@@ -478,6 +480,7 @@ if __name__ == "__main__":
                 max_iter, convergence_tol)
 
     epec.iterate_cost_combinations()
+    epec.plot_clearing_price_over_iterations(run_id = 0)
     # epec.plot_alpha_over_iterations(run_id = 0)
     # epec.plot_dispatch_over_iterations(run_id = 0)
     # epec.plot_merit_order_curve(run_id = 0)
