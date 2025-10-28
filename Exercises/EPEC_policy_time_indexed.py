@@ -3,12 +3,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import itertools
 
-class EPEC:
+class EPEC_time_indexed:
     def __init__(self, 
                  alpha_min, alpha_max, 
                  Pmin, Pmax, 
                  demand,
                  cost_min, cost_max, segments,
+                 time_steps,
                  max_iter = 100, convergence_tol = 0.01):
 
         self.alpha_min = alpha_min
@@ -22,6 +23,7 @@ class EPEC:
         self.cost_min = cost_min
         self.cost_max = cost_max
         self.segments = segments
+        self.time_steps = time_steps
             
         self.max_iter = max_iter
         self.convergence_tol = convergence_tol
@@ -93,7 +95,7 @@ class EPEC:
             for i in range(self.num_generators):
                 self._build_model(i, cost_vector, init_cost_vector)
                 self.solve()
-                cost_vector[i] = self.model.alpha.value
+                cost_vector[i][:] = self.model.alpha.value
                 profit_history[iter][i] = -self.model.objective()
                 alpha_history[iter][i] = self.model.alpha.value
                 dispatch_history[iter] = [self.model.P_G[ii].value for ii in self.model.n_gen]
@@ -133,6 +135,7 @@ class EPEC:
 
         self.model.n_gen = Set(initialize=range(self.num_generators))
         self.model.strategic_index = Set(initialize=[index_strategic])  # Index of the strategic producer
+        self.model.t = Set(initialize=range(self.time_steps))
 
         self._build_variables()
         self._build_objective(cost_vector, init_cost_vector)
@@ -140,126 +143,131 @@ class EPEC:
         self._build_policy_constraints(cost_vector)
 
     def _build_variables(self):
-        self.model.P_G = Var(self.model.n_gen, domain=Reals)
-        self.model.alpha = Var(domain=Reals)
-        self.model.lambda_dual = Var(domain=Reals)
-        self.model.mu_min = Var(self.model.n_gen, domain=Reals)
-        self.model.mu_max = Var(self.model.n_gen, domain=Reals)
-        self.model.z_min = Var(self.model.n_gen, domain=Binary)
-        self.model.z_max = Var(self.model.n_gen, domain=Binary)
-        self.model.tau = Var(self.model.n_gen, domain=Binary)
-        self.model.omega = Var(self.model.n_gen - self.model.strategic_index, domain=Reals)
+        self.model.P_G = Var(self.model.n_gen, self.model.t, domain=Reals)
+        self.model.alpha = Var(self.model.t, domain=Reals)
+        self.model.lambda_dual = Var(self.model.t, domain=Reals)
+        self.model.mu_min = Var(self.model.n_gen, self.model.t, domain=Reals)
+        self.model.mu_max = Var(self.model.n_gen, self.model.t, domain=Reals)
+        self.model.z_min = Var(self.model.n_gen, self.model.t, domain=Binary)
+        self.model.z_max = Var(self.model.n_gen, self.model.t, domain=Binary)
+        self.model.tau = Var(self.model.n_gen, self.model.t, domain=Binary)
+        self.model.omega = Var(self.model.n_gen - self.model.strategic_index, self.model.t, domain=Reals)
 
-    def _build_objective(self, cost_vector, init_cost_vector, lin = True):
-        if lin == False:
-            self.model.objective = Objective(
-                expr=sum(
-                    -self.model.lambda_dual * self.model.P_G[i] + init_cost_vector[i] * self.model.P_G[i]
-                    for i in self.model.strategic_index
-                ),
+    def _build_objective(self, cost_vector, init_cost_vector):
+        # Strong duality substitution
+        dual_costs = sum(
+            self.model.lambda_dual[t] * self.demand[t]
+            + sum(self.model.mu_min[i, t] * self.Pmin[i] for i in self.model.n_gen)
+            - sum(self.model.mu_max[i, t] * self.Pmax[i] for i in self.model.n_gen)
+            for t in self.model.t
+        )
+
+        non_strat_costs = sum(
+            cost_vector[i][t] * self.model.P_G[i, t]
+            for i in self.model.n_gen - self.model.strategic_index 
+            for t in self.model.t
+        )
+
+        strat_term1 = sum(-self.model.mu_min[i, t] * self.Pmin[i] + self.model.mu_max[i, t] * self.Pmax[i] for i in self.model.strategic_index
+                           for t in self.model.t)
+
+        strat_term2 = sum(
+            init_cost_vector[i][t] * self.model.P_G[i, t]
+            for i in self.model.strategic_index
+            for t in self.model.t
+        )
+
+        self.model.objective = Objective(
+            expr= - (dual_costs - non_strat_costs + strat_term1) + strat_term2,
             sense=minimize
         )
-        else:
-            # Strong duality substitution
-            dual_costs = (
-                self.model.lambda_dual * self.demand
-                + sum(self.model.mu_min[i] * self.Pmin[i] for i in self.model.n_gen)
-                - sum(self.model.mu_max[i] * self.Pmax[i] for i in self.model.n_gen)
-            )
-
-            non_strat_costs = sum(
-                cost_vector[i] * self.model.P_G[i]
-                for i in self.model.n_gen - self.model.strategic_index
-            )
-
-            strat_term1 = sum(-self.model.mu_min[i] * self.Pmin[i] 
-                              + self.model.mu_max[i] * self.Pmax[i] for i in self.model.strategic_index)
-
-            strat_term2 = sum(
-                init_cost_vector[i] * self.model.P_G[i]
-                for i in self.model.strategic_index
-            )
-
-            self.model.objective = Objective(
-                expr= - (dual_costs - non_strat_costs + strat_term1) + strat_term2,
-                sense=minimize
-            )
 
     def _build_constraints(self, cost_vector):
+        
         # Alpha constraints
-        self.model.alpha_constraint_min = Constraint(expr=self.model.alpha >= self.alpha_min)
-        self.model.alpha_constraint_max = Constraint(expr=self.model.alpha <= self.alpha_max)
+        def alpha_min_rule(m, t):
+            return m.alpha[t] >= self.alpha_min
+        def alpha_max_rule(m, t):
+            return m.alpha[t] <= self.alpha_max
+        
+        self.model.alpha_min_constr = Constraint(self.model.t, rule=alpha_min_rule)
+        self.model.alpha_max_constr = Constraint(self.model.t, rule=alpha_max_rule)
 
-        # Power balance constraint
-        self.model.power_balance = Constraint(expr=sum(self.model.P_G[i] for i in range(self.num_generators)) == self.demand)
+        def power_balance_rule(m, t):
+            return sum(m.P_G[i, t] for i in m.n_gen) == self.demand[t]
 
-        def stationarity_rule(m, i):
-            return m.alpha - m.lambda_dual - m.mu_min[i] + m.mu_max[i] == 0
+        self.model.power_balance = Constraint(self.model.t, rule=power_balance_rule)
 
-        self.model.stationarity = Constraint(self.model.strategic_index, rule=stationarity_rule)
+        def stationarity_rule(m, i, t):
+            return m.alpha[t] - m.lambda_dual[t] - m.mu_min[i, t] + m.mu_max[i, t] == 0
 
-        def stationarity_non_strategic_rule(m, i):
-            return cost_vector[i] - m.lambda_dual - m.mu_min[i] + m.mu_max[i] == 0
+        self.model.stationarity = Constraint(self.model.strategic_index, self.model.t, rule=stationarity_rule)
+
+        def stationarity_non_strategic_rule(m, i, t):
+            return cost_vector[i][t] - m.lambda_dual[t] - m.mu_min[i, t] + m.mu_max[i, t] == 0
 
         self.model.stationarity_non_strategic = Constraint(
-            self.model.n_gen - self.model.strategic_index, rule=stationarity_non_strategic_rule
+            self.model.n_gen - self.model.strategic_index, self.model.t, rule=stationarity_non_strategic_rule
         )
         # ------------------------
         # Big-M + binary formulation
         # ------------------------
         M = 1000
 
-        def tau_rule_lower(m, i):
-            return m.alpha <= cost_vector[i] * 0.999 + M * m.tau[i]
+        def tau_rule_lower(m, i, t):
+            return m.alpha[t] <= cost_vector[i][t] * 0.999 + M * m.tau[i, t]
 
-        def tau_rule_upper(m, i):
-            return m.alpha >= cost_vector[i] * 1.001 - M * (1 - m.tau[i])
+        def tau_rule_upper(m, i, t):
+            return m.alpha[t] >= cost_vector[i][t] * 1.001 - M * (1 - m.tau[i, t])
 
-        self.model.tau_lower = Constraint(self.model.n_gen - self.model.strategic_index, rule=tau_rule_lower)
-        self.model.tau_upper = Constraint(self.model.n_gen - self.model.strategic_index, rule=tau_rule_upper)
+        self.model.tau_lower = Constraint(self.model.n_gen - self.model.strategic_index, self.model.t, rule=tau_rule_lower)
+        self.model.tau_upper = Constraint(self.model.n_gen - self.model.strategic_index, self.model.t, rule=tau_rule_upper)
 
-        self.model.tau_sum = Constraint(expr=sum(self.model.tau[i] for i in self.model.n_gen - self.model.strategic_index) <= len(cost_vector) - 1)
+        def tau_sum_rule(m, i, t):
+            return sum(m.tau[i, t] for i in m.n_gen - m.strategic_index for t in m.t) <= len(cost_vector[i]) - 1
 
+        self.model.tau_sum = Constraint(self.model.n_gen - self.model.strategic_index, self.model.t, rule=tau_sum_rule)
+       
         # min bound
-        def gen_min_lower_rule(m, i):
-            return m.P_G[i] - self.Pmin[i] >= 0
-        self.model.gen_min_lower = Constraint(self.model.n_gen, rule=gen_min_lower_rule)
+        def gen_min_lower_rule(m, i, t):
+            return m.P_G[i, t] - self.Pmin[i] >= 0
+        self.model.gen_min_lower = Constraint(self.model.n_gen, self.model.t, rule=gen_min_lower_rule)
 
-        def gen_min_upper_rule(m, i):
-            return m.P_G[i] - self.Pmin[i] <= M * m.z_min[i]
-        self.model.gen_min_upper = Constraint(self.model.n_gen, rule=gen_min_upper_rule)
+        def gen_min_upper_rule(m, i, t):
+            return m.P_G[i, t] - self.Pmin[i] <= M * m.z_min[i, t]
+        self.model.gen_min_upper = Constraint(self.model.n_gen, self.model.t, rule=gen_min_upper_rule)
 
-        def mu_min_lower_rule(m, i):
-            return m.mu_min[i] >= 0
-        self.model.mu_min_lower = Constraint(self.model.n_gen, rule=mu_min_lower_rule)
+        def mu_min_lower_rule(m, i, t):
+            return m.mu_min[i, t] >= 0
+        self.model.mu_min_lower = Constraint(self.model.n_gen, self.model.t, rule=mu_min_lower_rule)
 
-        def mu_min_upper_rule(m, i):
-            return m.mu_min[i] <= M * (1 - m.z_min[i])
-        self.model.mu_min_upper = Constraint(self.model.n_gen, rule=mu_min_upper_rule)
+        def mu_min_upper_rule(m, i, t):
+            return m.mu_min[i, t] <= M * (1 - m.z_min[i, t])
+        self.model.mu_min_upper = Constraint(self.model.n_gen, self.model.t, rule=mu_min_upper_rule)
 
         # max bound
-        def gen_max_lower_rule(m, i):
-            return self.Pmax[i] - m.P_G[i] >= 0
-        self.model.gen_max_lower = Constraint(self.model.n_gen, rule=gen_max_lower_rule)
+        def gen_max_lower_rule(m, i, t):
+            return self.Pmax[i] - m.P_G[i, t] >= 0
+        self.model.gen_max_lower = Constraint(self.model.n_gen, self.model.t, rule=gen_max_lower_rule)
 
-        def gen_max_upper_rule(m, i):
-            return self.Pmax[i] - m.P_G[i] <= M * m.z_max[i]
-        self.model.gen_max_upper = Constraint(self.model.n_gen, rule=gen_max_upper_rule)
+        def gen_max_upper_rule(m, i, t):
+            return self.Pmax[i] - m.P_G[i, t] <= M * m.z_max[i, t]
+        self.model.gen_max_upper = Constraint(self.model.n_gen, self.model.t, rule=gen_max_upper_rule)
 
-        def mu_max_upper_rule(m, i):
-            return m.mu_max[i] <= M * (1 - m.z_max[i])
-        self.model.mu_max_upper = Constraint(self.model.n_gen, rule=mu_max_upper_rule)
+        def mu_max_upper_rule(m, i, t):
+            return m.mu_max[i, t] <= M * (1 - m.z_max[i, t])
+        self.model.mu_max_upper = Constraint(self.model.n_gen, self.model.t, rule=mu_max_upper_rule)
 
-        def mu_max_lower_rule(m, i):
-            return m.mu_max[i] >= 0
-        self.model.mu_max_lower = Constraint(self.model.n_gen, rule=mu_max_lower_rule)
-    
+        def mu_max_lower_rule(m, i, t):
+            return m.mu_max[i, t] >= 0
+        self.model.mu_max_lower = Constraint(self.model.n_gen, self.model.t, rule=mu_max_lower_rule)
+
     def _build_policy_constraints(self, cost_vector):
         # Create arbitrary policy constraints
-        def policy_rule_1(m):
-            return m.alpha == sum(m.omega[i] * cost_vector[i] * self.Pmax[i] for i in self.model.n_gen - self.model.strategic_index)
+        def policy_rule_1(m, t):
+            return m.alpha[t] == sum(m.omega[i, t] * cost_vector[i][t] * self.Pmax[i] for i in self.model.n_gen - self.model.strategic_index)
 
-        self.model.policy_1 = Constraint(rule=policy_rule_1)
+        self.model.policy_1 = Constraint(self.model.t, rule=policy_rule_1)
 
     def solve(self, solver_name="gurobi"):
         """
@@ -539,30 +547,31 @@ if __name__ == "__main__":
     cost_max = [60, 70, 80]
 
     segments = 2 
+    timesteps = 3
 
     max_iter = 100   
-    demand = 95
+
+    demand = np.random.randint(90, 100, size=timesteps).tolist()
+
+    demand = [90, 90, 90]
 
     convergence_tol = 0.01
 
-    epec = EPEC(alpha_min, alpha_max, 
+    epec = EPEC_time_indexed(alpha_min, alpha_max, 
                 Pmin, Pmax, demand, 
                 cost_min, cost_max, 
                 segments, 
+                timesteps,
                 max_iter, convergence_tol)
 
-    epec.iterate_cost_combinations()
+    # epec.iterate_cost_combinations()
     # epec.plot_clearing_price_over_iterations(run_id = 0)
     # epec.plot_alpha_over_iterations(run_id = 0)
     # epec.plot_dispatch_over_iterations(run_id = 0)
-    epec.plot_merit_order_curve(run_id = 0)
+    # epec.plot_merit_order_curve(run_id = 0)
     # epec.plot_weights(run_id = 0)
     # epec.plot_PoA()
 
-    # print("Omega[0]:", epec.model.omega[0].value)
-    # print("Omega[1]:", epec.model.omega[1].value)
-    # print("Final Bid[0]:", epec.results[26]['final_bid'][0])
-    # print("Final Bid[1]:", epec.results[26]['final_bid'][1])
-    # print("Pmax[0]:", epec.Pmax[0])
-    # print("Pmax[1]:", epec.Pmax[1])
-    # print("Policy Check:", epec.model.alpha.value, "==", epec.model.omega[0].value * epec.results[26]['final_bid'][0] * epec.Pmax[0] + epec.model.omega[1].value * epec.results[26]['final_bid'][1] * epec.Pmax[1])
+
+    epec._build_model(0, [[20, 20, 20], [30, 30, 30], [40, 40, 40]], [[20, 20, 20], [30, 30, 30], [40, 40, 40]])
+    epec.solve()
