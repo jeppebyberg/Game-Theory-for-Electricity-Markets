@@ -41,6 +41,9 @@ class EPEC:
 
         print(f"Total combinations to evaluate: {len(all_combinations)}")
 
+        self.not_converged = 0
+        self.n_runs = len(all_combinations)
+
         for run_id, init_cost_vector in enumerate(all_combinations):
             init_cost_vector = np.array(init_cost_vector)
             profits, alphas, dispatches, iterations, PoA, dispatch_ED, clearing_price_ED, final_dispatch, final_bid, clearing_price_SP, clearing_price_history, weight_history = self.run_best_response(init_cost_vector, run_id)
@@ -61,12 +64,12 @@ class EPEC:
                 "weight_history": weight_history
 
             }
-        worst_id, worst_poa = max(
+        worst_id, self.worst_poa = max(
             ((id, res['PoA']) for id, res in epec.results.items()),
             key=lambda x: x[1]
         )
 
-        print(f"Worst PoA: {worst_poa:.2f} (from run {worst_id})")
+        print(f"Worst PoA: {self.worst_poa:.2f} (from run {worst_id})")
 
     def run_best_response(self, init_cost_vector, run_id):
         # reset histories for this run
@@ -124,6 +127,7 @@ class EPEC:
                 bid_array = np.array(alpha_history[-10:])
                 mean_bid = np.mean(bid_array, axis=0)
                 final_bid = mean_bid
+                self.not_converged += 1
                 break
             iter += 1
         return profit_history, alpha_history, dispatch_history, iter, PoA, dispatch_ED, clearing_price_ED, final_dispatch, final_bid, clearing_price_SP, clearing_price_history, weight_history
@@ -527,6 +531,49 @@ class EPEC:
         plt.tight_layout()
         plt.show()
 
+def generate_scaled_setup(base_demand=95, base_total_capacity=165, n_players=3):
+    """
+    Generates ordered generator parameters for n_players,
+    preserving the relative pattern from [50, 55, 60].
+    Keeps total system capacity constant for comparable social welfare.
+    """
+
+    # --- Reference pattern from 3-player base case ---
+    base_pattern = np.array([50, 55, 60])
+    base_pattern = base_pattern / base_pattern.sum()  # normalize
+
+    # --- Interpolate to match n_players ---
+    # If n_players = 3 → exactly [50,55,60]
+    # If n_players > 3 → smooth linear spacing between 0.95 and 1.05 of normalized pattern
+    x_base = np.linspace(0, 1, len(base_pattern))
+    x_new = np.linspace(0, 1, n_players)
+    pattern_scaled = np.interp(x_new, x_base, base_pattern)
+
+    # Normalize so total capacity is constant (≈165)
+    Pmax = pattern_scaled / pattern_scaled.sum() * base_total_capacity
+    Pmin = np.zeros(n_players)
+
+    # --- Costs: follow same increasing pattern ---
+    base_cost_min = np.array([20, 30, 40])
+    base_cost_max = np.array([60, 70, 80])
+
+    cost_min_pattern = np.interp(x_new, x_base, base_cost_min)
+    cost_max_pattern = np.interp(x_new, x_base, base_cost_max)
+
+    cost_min = np.round(cost_min_pattern, 1)
+    cost_max = np.round(cost_max_pattern, 1)
+
+    demand = base_demand
+
+    return (
+        Pmin.tolist(),
+        Pmax.round(1).tolist(),
+        cost_min.tolist(),
+        cost_max.tolist(),
+        demand,
+    )
+
+
 if __name__ == "__main__":
     
     alpha_min = -100
@@ -538,26 +585,51 @@ if __name__ == "__main__":
     cost_min = [20, 30, 40]
     cost_max = [60, 70, 80]
 
-    segments = 2 
+    segments = 2
 
     max_iter = 100   
     demand = 95
 
     convergence_tol = 0.01
 
-    epec = EPEC(alpha_min, alpha_max, 
+    PoA = []
+    convergence_ratio = []
+
+    for n_players in range(3, 8):  # adjust upper limit as desired
+        print(f"\n=== Running EPEC with {n_players} generators ===")
+
+        Pmin, Pmax, cost_min, cost_max, demand = generate_scaled_setup(
+            base_demand=95,
+            base_total_capacity=165,
+            n_players=n_players
+        )
+
+        epec = EPEC(alpha_min, alpha_max, 
                 Pmin, Pmax, demand, 
                 cost_min, cost_max, 
                 segments, 
                 max_iter, convergence_tol)
 
-    epec.iterate_cost_combinations()
-    # epec.plot_clearing_price_over_iterations(run_id = 0)
-    # epec.plot_alpha_over_iterations(run_id = 0)
-    # epec.plot_dispatch_over_iterations(run_id = 0)
-    epec.plot_merit_order_curve(run_id = 0)
-    # epec.plot_weights(run_id = 0)
-    # epec.plot_PoA()
+        epec.iterate_cost_combinations()
+
+        PoA.append(epec.worst_poa)
+        convergence_ratio.append(epec.not_converged / epec.n_runs)
+
+    plt.plot(range(3, 8), PoA, marker='o', label = 'PoA')
+    plt.plot(range(3, 8), convergence_ratio, marker='o', label = 'Convergence Ratio')
+    plt.xlabel('Number of Players')
+    plt.ylabel('Value')
+    plt.title('EPEC Performance Metrics')
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+    # # epec.plot_clearing_price_over_iterations(run_id = 0)
+    # # epec.plot_alpha_over_iterations(run_id = 0)
+    # # epec.plot_dispatch_over_iterations(run_id = 0)
+    # epec.plot_merit_order_curve(run_id = 0)
+    # # epec.plot_weights(run_id = 0)
+    # # epec.plot_PoA()
 
     # print("Omega[0]:", epec.model.omega[0].value)
     # print("Omega[1]:", epec.model.omega[1].value)
