@@ -77,7 +77,7 @@ class EPEC:
         clearing_price_history = []
         weight_history = []
 
-        dispatch_ED, clearing_price_ED, minimum_cost_ED = epec.economic_dispatch(init_cost_vector)
+        dispatch_ED, clearing_price_ED, minimum_cost_ED = self.economic_dispatch(init_cost_vector)
 
         iter = 0
         cost_vector = init_cost_vector.copy()
@@ -207,7 +207,7 @@ class EPEC:
         # ------------------------
         # Big-M + binary formulation
         # ------------------------
-        M = 1000
+        M = 10000
 
         def tau_rule_lower(m, i):
             return m.alpha <= cost_vector[i] * 0.999 + M * m.tau[i]
