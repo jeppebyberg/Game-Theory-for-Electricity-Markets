@@ -333,6 +333,7 @@ def plot_bid_history(all_results, generators, title="Generator Bid History Acros
         for gen_idx in range(n_generators):
             bid_history[gen_idx].append(iteration_bids[gen_idx])
     
+    plt.figure(figsize=(8, 6))
     # Create plot
     fig, ax = plt.subplots(figsize=(10, 6))
     

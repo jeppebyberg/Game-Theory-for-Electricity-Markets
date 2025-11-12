@@ -90,33 +90,73 @@ class StrategicRotation:
         mc_dispatch = {i: pyo.value(mc.model.p[i]) for i in mc.model.G}
         mc_costs = {i: self.generators[i].cost for i in range(len(self.generators))}
         
+        # Build mapping from original generator list to mpec's flattened order
+        # mpec flattens generators by iterating through actors
+        original_to_mpec = {}  # maps original index -> mpec index
+        mpec_to_original = {}  # maps mpec index -> original index
+        mpec_to_actor = {}     # maps mpec index -> actor_id
+        
+        mpec_idx = 0
+        for actor in self.actors:
+            for gen in actor.generators:
+            # Find this generator in the original list by matching attributes
+            # (can't use object identity because deepcopy creates new objects)
+                original_idx = None
+                for i, orig_gen in enumerate(self.generators):
+                    # Match by cost and p_max (unique identifier for generators)
+                    if (abs(orig_gen.cost - gen.cost) < 0.01 and 
+                        abs(orig_gen.p_max - gen.p_max) < 0.01):
+                        original_idx = i
+                        break
+                
+                if original_idx is not None:
+                    original_to_mpec[original_idx] = mpec_idx
+                    mpec_to_original[mpec_idx] = original_idx
+                    mpec_to_actor[mpec_idx] = actor.actor_id
+                
+                mpec_idx += 1
+        
         for res in data:
-            print(f"\n{'='*100}")
+            print(f"\n{'='*110}")
             print(f"ITERATION {res['iteration']} | ROUND {res['round']} | Strategic Actor: {res['strategic_actor']}")
-            print(f"{'='*100}")
+            print(f"{'='*110}")
             
-            # Header
-            print(f"\n{'Generator':<12} {'True Cost':<12} {'MC Dispatch':<15} {'MPEC Bid':<12} {'MPEC Dispatch':<15} {'Markup':<12}")
-            print(f"{'-'*100}")
+            # Header - added Actor column
+            print(f"\n{'Generator':<12} {'Actor':<8} {'True Cost':<12} {'MC Dispatch':<15} {'MPEC Bid':<12} {'MPEC Dispatch':<15} {'Markup':<12}")
+            print(f"{'-'*110}")
             
-            # Generator rows
-            for gen_idx in sorted(res['bids'].keys()):
-                true_cost = mc_costs[gen_idx]
-                mc_disp = mc_dispatch[gen_idx]
-                mpec_bid = res['bids'][gen_idx]
-                mpec_disp = res['dispatch'][gen_idx]
+            # Display generators in ORIGINAL order (self.generators)
+            for original_idx in range(len(self.generators)):
+                # Get the corresponding mpec index
+                mpec_idx = original_to_mpec.get(original_idx)
+                
+                if mpec_idx is None:
+                    continue  # Skip if this generator isn't in any actor
+                
+                # Get data using ORIGINAL index for display
+                true_cost = mc_costs[original_idx]
+                mc_disp = mc_dispatch[original_idx]
+                
+                # Get data using MPEC index for MPEC results
+                mpec_bid = res['bids'][mpec_idx]
+                mpec_disp = res['dispatch'][mpec_idx]
                 markup = mpec_bid - true_cost
                 
-                strategic_marker = " *" if gen_idx == res['strategic_actor'] else ""
+                # Get actor for this generator
+                actor_id = mpec_to_actor.get(mpec_idx, "?")
                 
-                print(f"G{gen_idx}{strategic_marker:<10} "
+                # Mark generator as strategic if it belongs to the strategic actor
+                strategic_marker = " *" if actor_id == res['strategic_actor'] else ""
+                
+                print(f"G{original_idx}{strategic_marker:<10} "
+                    f"{actor_id:<8} "
                     f"${true_cost:<11.2f} "
                     f"{mc_disp:<15.2f} "
                     f"${mpec_bid:<11.2f} "
                     f"{mpec_disp:<15.2f} "
                     f"${markup:+.2f}")
             
-            print(f"{'-'*100}")
+            print(f"{'-'*110}")
             
             # Summary statistics
             print(f"\n{'Market Clearing Price:':<30} MC: ${mc_price:.2f}/MWh  |  MPEC: ${res['lambda']:.2f}/MWh")
@@ -130,8 +170,7 @@ class StrategicRotation:
             mpec_total_cost = sum(mc_costs[i] * res['dispatch'][i] for i in mc_costs.keys())
             print(f"{'Total Generation Cost:':<30} MC: ${mc_total_cost:.2f}  |  MPEC: ${mpec_total_cost:.2f}")
             
-            print(f"\n* = Strategic bidder")
-
+            print(f"\n* = Strategic bidder (belongs to strategic actor)")
 
 # Example usage
 if __name__ == "__main__":
@@ -139,14 +178,15 @@ if __name__ == "__main__":
     g0 = Generator(p_max=400, cost=15)
     g1 = Generator(p_max=650, cost=17)
     g2 = Generator(p_max=400, cost=12)
+    g3 = Generator(p_max=240, cost=13)
 
     actors = [
         Actor(actor_id=0, generators=[g0], is_strategic=False),
-        Actor(actor_id=1, generators=[g1], is_strategic=False),
-        Actor(actor_id=2, generators=[g2], is_strategic=False),
+        Actor(actor_id=1, generators=[g1, g2], is_strategic=False),
+        Actor(actor_id=2, generators=[g3], is_strategic=False)
     ]
 
-    generators = [g0, g1, g2]
+    generators = [g0, g1, g2, g3]
 
 
     rotation = StrategicRotation(demand=1000, actors=actors, generators=generators, iterations=3)
