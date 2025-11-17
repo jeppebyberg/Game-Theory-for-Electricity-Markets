@@ -2,6 +2,7 @@ from pyomo.environ import *
 import numpy as np
 import matplotlib.pyplot as plt
 import itertools
+import random
 
 class EPEC:
     def __init__(self, 
@@ -59,30 +60,24 @@ class EPEC:
                 "dispatch_ED": dispatch_ED,
                 "clearing_price_ED": clearing_price_ED,
                 "weight_history": weight_history
-
             }
         worst_id, worst_poa = max(
-            ((id, res['PoA']) for id, res in epec.results.items()),
+            ((id, res['PoA']) for id, res in self.results.items()),
             key=lambda x: x[1]
         )
 
-        print(f"Worst PoA: {worst_poa:.2f} (from run {worst_id})")
+        print(f"Worst PoA: {worst_poa:.2f} (from run id {worst_id})")
 
     def run_best_response(self, init_cost_vector, run_id):
-        # reset histories for this run
-        profit_history = []
-        alpha_history = []
-        dispatch_history = []
-        convergence_check = []
-        clearing_price_history = []
-        weight_history = []
+        profit_history, alpha_history, dispatch_history = [], [], []
+        convergence_check, clearing_price_history, weight_history = [], [], []
 
         dispatch_ED, clearing_price_ED, minimum_cost_ED = self.economic_dispatch(init_cost_vector)
-
         iter = 0
         cost_vector = init_cost_vector.copy()
-
-        # Best-response iterations
+        
+        random.seed(run_id)
+        
         while iter <= self.max_iter:
             profit_history.append([None] * self.num_generators)
             alpha_history.append([None] * self.num_generators)
@@ -90,43 +85,101 @@ class EPEC:
             convergence_check.append([False] * self.num_generators)
             weight_history.append([None] * self.num_generators)
 
-            for i in range(self.num_generators):
+
+            ######## Jacobi Method ########
+            # # --- Compute new best responses ---
+            # new_cost_vector = cost_vector.copy()
+            # for i in range(self.num_generators):
+            #     self._build_model(i, cost_vector, init_cost_vector)
+            #     self.solve()
+            #     alpha_new = self.model.alpha.value
+
+            #     # --- Enforce rational bidding: never below marginal cost ---
+            #     alpha_new = max(alpha_new, init_cost_vector[i])
+            #     new_cost_vector[i] = alpha_new
+
+            # # --- Apply relaxation (damping) ---
+            # lambda_relax = min(0.3 + 0.01*iter, 1.0)
+            # print(f"Iteration {iter}: Relaxation factor = {lambda_relax:.2f}")
+            # cost_vector = (1 - lambda_relax) * np.array(cost_vector) + lambda_relax * np.array(new_cost_vector)
+            # cost_vector = cost_vector.tolist()
+
+            players = list(range(self.num_generators))
+            random.shuffle(players)                    # randomize update order each iteration
+
+            for i in players:
                 self._build_model(i, cost_vector, init_cost_vector)
                 self.solve()
-                cost_vector[i] = self.model.alpha.value
-                profit_history[iter][i] = -self.model.objective()
-                alpha_history[iter][i] = self.model.alpha.value
-                dispatch_history[iter] = [self.model.P_G[ii].value for ii in self.model.n_gen]
-                clearing_price_SP = self.model.lambda_dual.value
-                weight_history[iter][i] = [self.model.omega[ii].value for ii in self.model.n_gen - self.model.strategic_index]
+                alpha_new = self.model.alpha.value
 
-                if iter > 0:
-                    if profit_history[iter][i] >= (1 - self.convergence_tol) * profit_history[iter - 1][i] and profit_history[iter][i] <= (1 + self.convergence_tol) * profit_history[iter - 1][i]:
-                        convergence_check[iter][i] = True
+                # # --- Enforce rational bidding floor and cap ---
+                alpha_new = max(alpha_new, init_cost_vector[i])
+                cost_vector[i] = alpha_new
+                alpha_history[iter][i] = alpha_new
 
-            clearing_price_history.append(clearing_price_SP)
+            # --- Market clearing (global consistency) ---
+            dispatch_round, clearing_price_round, _ = self.economic_dispatch(cost_vector)
+            dispatch_history[iter] = dispatch_round
+            clearing_price_history.append(clearing_price_round)
 
-            if all(convergence_check[iter]):
-                print(f"Run id: {run_id} - Converged after {iter} iterations.")
-                PoA = clearing_price_SP * self.demand / minimum_cost_ED
-                final_bid = cost_vector.copy()
-                final_dispatch = dispatch_history[iter]
-                break
+            for j in range(self.num_generators):
+                profit_history[iter][j] = (
+                    clearing_price_round * dispatch_round[j]
+                    - init_cost_vector[j] * dispatch_round[j]
+                )
+
+            # --- Convergence check ---
+            if iter > 5:
+                # price_change = abs(clearing_price_history[-1] - clearing_price_history[-2])
+                # bid_change   = max(abs(alpha_history[iter][k] - alpha_history[iter-1][k])
+                #                 for k in range(self.num_generators))
+
+                for j in range(self.num_generators):
+                    prev_profit = profit_history[iter - 1][j]
+                    curr_profit = profit_history[iter][j]
+                    # curr_clearing_price = clearing_price_history[-1]
+                    # prev_clearing_price = clearing_price_history[-2]
+                    curr_bid = alpha_history[iter][j]
+                    prev_bid = alpha_history[iter - 1][j]
+                    if (
+                        curr_profit >= prev_profit * (1 - self.convergence_tol)
+                        and curr_profit <= prev_profit * (1 + self.convergence_tol)
+                        # and curr_clearing_price >= prev_clearing_price * (1 - self.convergence_tol)
+                        # and curr_clearing_price <= prev_clearing_price * (1 + self.convergence_tol)
+                        and curr_bid >= prev_bid * (1 - self.convergence_tol)
+                        and curr_bid <= prev_bid * (1 + self.convergence_tol)
+                    ):
+                        convergence_check[iter][j] = True
+                    else:
+                        convergence_check[iter][j] = False
+
+                if all(convergence_check[iter]):
+                    print(f"Run id: {run_id} - Converged after {iter} full rounds.")
+                    break
             if iter == self.max_iter:
-                print(f"Run id: {run_id} - Reached max iterations - {self.max_iter}.")
-                PoA = clearing_price_SP * self.demand / minimum_cost_ED
-                
-                # Compute mean of last 10 dispatches 
-                dispatch_array = np.array(dispatch_history[-10:])
-                mean_dispatch = np.mean(dispatch_array, axis=0)
-                final_dispatch = mean_dispatch
+                print(f"Run id: {run_id} - Reached maximum iterations {self.max_iter} without convergence.")
 
-                bid_array = np.array(alpha_history[-10:])
-                mean_bid = np.mean(bid_array, axis=0)
-                final_bid = mean_bid
-                break
             iter += 1
-        return profit_history, alpha_history, dispatch_history, iter, PoA, dispatch_ED, clearing_price_ED, final_dispatch, final_bid, clearing_price_SP, clearing_price_history, weight_history
+
+        # --- Final consistent results ---
+        PoA = clearing_price_round * self.demand / minimum_cost_ED
+        final_bid = cost_vector.copy()
+        final_dispatch = dispatch_round
+
+        return (
+            profit_history,
+            alpha_history,
+            dispatch_history,
+            iter,
+            PoA,
+            dispatch_ED,
+            clearing_price_ED,
+            final_dispatch,
+            final_bid,
+            clearing_price_round,
+            clearing_price_history,
+            weight_history,
+        )
 
     def _build_model(self, index_strategic, cost_vector, init_cost_vector):
         self.model = ConcreteModel()
@@ -137,7 +190,7 @@ class EPEC:
         self._build_variables()
         self._build_objective(cost_vector, init_cost_vector)
         self._build_constraints(cost_vector)
-        self._build_policy_constraints(cost_vector)
+        # self._build_policy_constraints(cost_vector)
 
     def _build_variables(self):
         self.model.P_G = Var(self.model.n_gen, domain=Reals)
@@ -150,40 +203,31 @@ class EPEC:
         self.model.tau = Var(self.model.n_gen, domain=Binary)
         self.model.omega = Var(self.model.n_gen - self.model.strategic_index, domain=Reals)
 
-    def _build_objective(self, cost_vector, init_cost_vector, lin = True):
-        if lin == False:
-            self.model.objective = Objective(
-                expr=sum(
-                    -self.model.lambda_dual * self.model.P_G[i] + init_cost_vector[i] * self.model.P_G[i]
-                    for i in self.model.strategic_index
-                ),
+    def _build_objective(self, cost_vector, init_cost_vector):
+        # Strong duality substitution
+        dual_costs = (
+            self.model.lambda_dual * self.demand
+            + sum(self.model.mu_min[i] * self.Pmin[i] for i in self.model.n_gen)
+            - sum(self.model.mu_max[i] * self.Pmax[i] for i in self.model.n_gen)
+        )
+
+        non_strat_costs = sum(
+            cost_vector[i] * self.model.P_G[i]
+            for i in self.model.n_gen - self.model.strategic_index
+        )
+
+        strat_term1 = sum(-self.model.mu_min[i] * self.Pmin[i] 
+                            + self.model.mu_max[i] * self.Pmax[i] for i in self.model.strategic_index)
+
+        strat_term2 = sum(
+            init_cost_vector[i] * self.model.P_G[i]
+            for i in self.model.strategic_index
+        )
+
+        self.model.objective = Objective(
+            expr= - (dual_costs - non_strat_costs + strat_term1) + strat_term2,
             sense=minimize
         )
-        else:
-            # Strong duality substitution
-            dual_costs = (
-                self.model.lambda_dual * self.demand
-                + sum(self.model.mu_min[i] * self.Pmin[i] for i in self.model.n_gen)
-                - sum(self.model.mu_max[i] * self.Pmax[i] for i in self.model.n_gen)
-            )
-
-            non_strat_costs = sum(
-                cost_vector[i] * self.model.P_G[i]
-                for i in self.model.n_gen - self.model.strategic_index
-            )
-
-            strat_term1 = sum(-self.model.mu_min[i] * self.Pmin[i] 
-                              + self.model.mu_max[i] * self.Pmax[i] for i in self.model.strategic_index)
-
-            strat_term2 = sum(
-                init_cost_vector[i] * self.model.P_G[i]
-                for i in self.model.strategic_index
-            )
-
-            self.model.objective = Objective(
-                expr= - (dual_costs - non_strat_costs + strat_term1) + strat_term2,
-                sense=minimize
-            )
 
     def _build_constraints(self, cost_vector):
         # Alpha constraints
@@ -218,7 +262,7 @@ class EPEC:
         self.model.tau_lower = Constraint(self.model.n_gen - self.model.strategic_index, rule=tau_rule_lower)
         self.model.tau_upper = Constraint(self.model.n_gen - self.model.strategic_index, rule=tau_rule_upper)
 
-        self.model.tau_sum = Constraint(expr=sum(self.model.tau[i] for i in self.model.n_gen - self.model.strategic_index) <= len(cost_vector) - 1)
+        # self.model.tau_sum = Constraint(expr=sum(self.model.tau[i] for i in self.model.n_gen - self.model.strategic_index) <= len(cost_vector) - 1)
 
         # min bound
         def gen_min_lower_rule(m, i):
@@ -399,7 +443,7 @@ class EPEC:
         # --- Formatting ---
         plt.xlabel('Quantity')
         plt.ylabel('Price')
-        plt.title('Merit Order Curve: ED vs Strategic Producer')
+        plt.title(f'Merit Order Curve: ED vs Strategic Producer. Run ID: {run_id}')
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
@@ -417,7 +461,7 @@ class EPEC:
             line = (
                 f"  {i:2d}   "
                 f"{init_cost_vector[i]:9.2f} "
-                f"{cost_sp:9.2f} "
+                f"{cost_sp:9.5f} "
                 f"{dispatch_ED[i]:8.2f}  "
                 f"{dispatch_SP[i]:8.2f}"
             )
@@ -527,23 +571,37 @@ class EPEC:
         plt.tight_layout()
         plt.show()
 
+    def plot_profits(self, run_id):
+        profit_history = self.results[run_id]['profit_history']
+
+        profit_history = np.array(profit_history)
+        plt.figure(figsize=(10, 6))
+        for i in range(self.num_generators):
+            plt.plot(profit_history[:, i], marker='o', label=f'Generator {i}')
+        plt.xlabel('Iteration')
+        plt.ylabel('Profit')
+        plt.title('Profit Evolution Over Iterations')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
 if __name__ == "__main__":
     
-    alpha_min = -100
-    alpha_max = 100
+    alpha_min = 0
+    alpha_max = 1200 * 2
     
-    Pmin = [0, 0, 0]
-    Pmax = [50, 55, 60]
+    Pmin = [0, 0, 0, 0]
+    Pmax = [30, 30, 30, 30]
 
-    cost_min = [20, 30, 40]
-    cost_max = [60, 70, 80]
+    cost_min = [200, 300, 400, 500]
+    cost_max = [c * 2 for c in cost_min]
+    segments = 2
 
-    segments = 2 
+    max_iter = 150
+    demand = 80
 
-    max_iter = 100   
-    demand = 95
-
-    convergence_tol = 0.01
+    convergence_tol = 0.001
 
     epec = EPEC(alpha_min, alpha_max, 
                 Pmin, Pmax, demand, 
@@ -555,7 +613,9 @@ if __name__ == "__main__":
     # epec.plot_clearing_price_over_iterations(run_id = 0)
     # epec.plot_alpha_over_iterations(run_id = 0)
     # epec.plot_dispatch_over_iterations(run_id = 0)
-    epec.plot_merit_order_curve(run_id = 0)
+    for run_id in epec.results:
+        epec.plot_merit_order_curve(run_id = run_id)
+        epec.plot_profits(run_id = run_id)
     # epec.plot_weights(run_id = 0)
     # epec.plot_PoA()
 
