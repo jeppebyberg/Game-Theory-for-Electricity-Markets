@@ -41,10 +41,18 @@ class EPEC:
         all_combinations = list(itertools.product(*self.cost))
 
         print(f"Total combinations to evaluate: {len(all_combinations)}")
+        total_runs = len(all_combinations)
+        converged_runs = 0
 
         for run_id, init_cost_vector in enumerate(all_combinations):
             init_cost_vector = np.array(init_cost_vector)
-            profits, alphas, dispatches, iterations, PoA, dispatch_ED, clearing_price_ED, final_dispatch, final_bid, clearing_price_SP, clearing_price_history, weight_history = self.run_best_response(init_cost_vector, run_id)
+            (profits, alphas, dispatches, iterations, PoA, dispatch_ED, 
+             clearing_price_ED, final_dispatch, final_bid, clearing_price_SP, 
+             clearing_price_history, weight_history, converged, not_converged
+             ) = self.run_best_response(init_cost_vector, run_id)
+
+            if converged:
+                converged_runs += 1
 
             self.results[run_id] = {
                 "init_cost_vector": init_cost_vector,
@@ -59,14 +67,21 @@ class EPEC:
                 "clearing_price_history": clearing_price_history,
                 "dispatch_ED": dispatch_ED,
                 "clearing_price_ED": clearing_price_ED,
-                "weight_history": weight_history
+                "weight_history": weight_history,
+                "converged": converged,
+                "not_converged": not_converged,
             }
+
+        share_converged = 100 * converged_runs / total_runs if total_runs > 0 else 0.0
+        print(f"Converged in {converged_runs}/{total_runs} runs ({share_converged:.1f}%)")
+    
         worst_id, worst_poa = max(
             ((id, res['PoA']) for id, res in self.results.items()),
             key=lambda x: x[1]
         )
 
         print(f"Worst PoA: {worst_poa:.2f} (from run id {worst_id})")
+        return share_converged, worst_poa
 
     def run_best_response(self, init_cost_vector, run_id):
         profit_history, alpha_history, dispatch_history = [], [], []
@@ -75,6 +90,7 @@ class EPEC:
         dispatch_ED, clearing_price_ED, minimum_cost_ED = self.economic_dispatch(init_cost_vector)
         iter = 0
         cost_vector = init_cost_vector.copy()
+        converged = False
         
         random.seed(run_id)
         
@@ -155,6 +171,7 @@ class EPEC:
 
                 if all(convergence_check[iter]):
                     print(f"Run id: {run_id} - Converged after {iter} full rounds.")
+                    converged = True
                     break
             if iter == self.max_iter:
                 print(f"Run id: {run_id} - Reached maximum iterations {self.max_iter} without convergence.")
@@ -165,6 +182,8 @@ class EPEC:
         PoA = clearing_price_round * self.demand / minimum_cost_ED
         final_bid = cost_vector.copy()
         final_dispatch = dispatch_round
+
+        not_converged = not converged
 
         return (
             profit_history,
@@ -179,6 +198,8 @@ class EPEC:
             clearing_price_round,
             clearing_price_history,
             weight_history,
+            converged,
+            not_converged,
         )
 
     def _build_model(self, index_strategic, cost_vector, init_cost_vector):
@@ -586,20 +607,60 @@ class EPEC:
         plt.tight_layout()
         plt.show()
 
+def generate_scaled_setup(n_players: int, base_demand=100):
+    """
+    Generates ordered generator parameters for n_players,
+    preserving the relative pattern from [30, 35, 40, 45].
+    Keeps total system capacity constant for comparable social welfare.
+    """
+
+    # --- Reference pattern from 4-player base case ---
+    base_pattern = np.array([30, 35, 40, 45])
+    base_pattern_sum = base_pattern.sum()
+    base_pattern = base_pattern / base_pattern.sum()  # normalize
+
+    # --- Interpolate to match n_players ---
+    x_base = np.linspace(0, 1, len(base_pattern))
+    x_new = np.linspace(0, 1, n_players)
+    pattern_scaled = np.interp(x_new, x_base, base_pattern)
+
+    # Normalize so total capacity is constant (≈165)
+    Pmax = pattern_scaled / pattern_scaled.sum() * base_pattern_sum
+    Pmin = np.zeros(n_players)
+
+    # --- Costs: follow same increasing pattern ---
+    base_cost_min = np.array([200, 300, 400, 500])
+    base_cost_max = np.array([400, 600, 800, 1000])
+
+    cost_min_pattern = np.interp(x_new, x_base, base_cost_min)
+    cost_max_pattern = np.interp(x_new, x_base, base_cost_max)
+
+    cost_min = np.round(cost_min_pattern, 1)
+    cost_max = np.round(cost_max_pattern, 1)
+
+    demand = base_demand
+
+    return (
+        Pmin.tolist(),
+        Pmax.round(1).tolist(),
+        cost_min.tolist(),
+        cost_max.tolist(),
+        demand,
+    )
 if __name__ == "__main__":
     
     alpha_min = 0
-    alpha_max = 1200 * 2
+    alpha_max = 1200
     
     Pmin = [0, 0, 0, 0]
-    Pmax = [30, 30, 30, 30]
+    Pmax = [30, 35, 40, 45]
 
-    cost_min = [200, 300, 400, 500]
+    cost_min = [200, 250, 300, 350]
     cost_max = [c * 2 for c in cost_min]
     segments = 2
 
     max_iter = 150
-    demand = 80
+    demand = 100
 
     convergence_tol = 0.001
 
@@ -608,14 +669,59 @@ if __name__ == "__main__":
                 cost_min, cost_max, 
                 segments, 
                 max_iter, convergence_tol)
+   
+    epec_results = {}
 
-    epec.iterate_cost_combinations()
-    # epec.plot_clearing_price_over_iterations(run_id = 0)
-    # epec.plot_alpha_over_iterations(run_id = 0)
-    # epec.plot_dispatch_over_iterations(run_id = 0)
-    for run_id in epec.results:
-        epec.plot_merit_order_curve(run_id = run_id)
-        epec.plot_profits(run_id = run_id)
+    players_list = range(4, 11)
+    convergence_rate = []
+    worst_poa_list   = []
+
+
+    for n_players in players_list:
+        print(f"\n--- Running EPEC for {n_players} players ---")
+        Pmin, Pmax, cost_min, cost_max, demand = generate_scaled_setup(n_players=n_players)
+        print("Pmin:", Pmin)
+        print("Pmax:", Pmax)
+        print("Cost min:", cost_min)
+        print("Cost max:", cost_max)
+        print("Demand:", demand)
+
+        epec = EPEC(alpha_min, alpha_max, 
+                    Pmin, Pmax, demand, 
+                    cost_min, cost_max, 
+                    segments, 
+                    max_iter, convergence_tol)
+        share_converged, worst_poa = epec.iterate_cost_combinations()
+        convergence_rate.append(share_converged)
+        worst_poa_list.append(worst_poa)
+        epec_results[n_players] = epec
+    
+    # # --- Plot convergence rate vs number of players ---
+    plt.figure(figsize=(8, 5))
+    plt.plot(players_list, convergence_rate, marker='o')
+    plt.xlabel('Number of Players')
+    plt.ylabel('Convergence Rate (%)')
+    plt.title('EPEC Convergence Rate vs Number of Players')
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+    # # --- Plot worst PoA vs number of players ---
+    plt.figure(figsize=(8, 5))
+    plt.plot(players_list, worst_poa_list, marker='o', color='orange')
+    plt.xlabel('Number of Players')
+    plt.ylabel('Worst Price of Anarchy (PoA)')
+    plt.title('Worst PoA vs Number of Players')
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    # epec.iterate_cost_combinations()
+    # # epec.plot_clearing_price_over_iterations(run_id = 0)
+    # # epec.plot_alpha_over_iterations(run_id = 0)
+    # # epec.plot_dispatch_over_iterations(run_id = 0)
+    # for run_id in epec.results:
+    #     epec.plot_merit_order_curve(run_id = run_id)
+    #     epec.plot_profits(run_id = run_id)
     # epec.plot_weights(run_id = 0)
     # epec.plot_PoA()
 
