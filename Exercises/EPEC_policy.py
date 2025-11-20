@@ -52,7 +52,9 @@ class EPEC:
             init_cost_vector = np.array(init_cost_vector)
             (profits, alphas, dispatches, iterations, PoA, dispatch_ED, 
              clearing_price_ED, final_dispatch, final_bid, clearing_price_SP, 
-             clearing_price_history, weight_history, converged, not_converged
+             clearing_price_history, weight_history, converged, not_converged,
+             player_order_history, round_by_round_bids, round_by_round_dispatch, 
+             round_by_round_prices, round_by_round_profits
              ) = self.run_best_response(init_cost_vector, run_id)
 
             if converged:
@@ -137,6 +139,11 @@ class EPEC:
     def run_best_response(self, init_cost_vector, run_id):
         profit_history, alpha_history, dispatch_history = [], [], []
         convergence_check, clearing_price_history, weight_history = [], [], []
+        player_order_history = []
+        round_by_round_bids = []
+        round_by_round_dispatch = []
+        round_by_round_prices = []
+        round_by_round_profits = []
 
         dispatch_ED, clearing_price_ED, minimum_cost_ED = self.economic_dispatch(init_cost_vector)
         iter = 0
@@ -173,6 +180,12 @@ class EPEC:
 
             players = list(range(self.num_generators))
             random.shuffle(players)                    # randomize update order each iteration
+            player_order_history.append(players.copy())
+
+            iter_round_bids = []
+            iter_round_dispatch = []
+            iter_round_prices = []
+            iter_round_profits = []
 
             for p in players:
                 self._build_model(p, cost_vector, init_cost_vector)
@@ -182,6 +195,27 @@ class EPEC:
                     alpha_new = max(alpha_new, init_cost_vector[g])   # rational floor
                     cost_vector[g] = alpha_new
                     alpha_history[iter][g] = alpha_new
+                # --- Capture state after this player/actor acts ---
+                dispatch_after_round, clearing_price_after_round, _ = self.economic_dispatch(cost_vector)
+                iter_round_bids.append(cost_vector.copy())
+                iter_round_dispatch.append(dispatch_after_round)
+                iter_round_prices.append(clearing_price_after_round)
+                
+                # Calculate profit for the strategic player/actor
+                # If p is a single generator (int), calculate its profit
+                # If p is multiple generators (list/tuple/set), calculate total profit for the actor
+                if isinstance(p, (list, tuple, set)):
+                    strategic_profit = sum(
+                        clearing_price_after_round * dispatch_after_round[g]
+                        - init_cost_vector[g] * dispatch_after_round[g]
+                        for g in p
+                    )
+                else:
+                    strategic_profit = (
+                        clearing_price_after_round * dispatch_after_round[p]
+                        - init_cost_vector[p] * dispatch_after_round[p]
+                    )
+                iter_round_profits.append(strategic_profit)
 
             # --- Market clearing (global consistency) ---
             dispatch_round, clearing_price_round, _ = self.economic_dispatch(cost_vector)
@@ -193,6 +227,11 @@ class EPEC:
                     clearing_price_round * dispatch_round[j]
                     - init_cost_vector[j] * dispatch_round[j]
                 )
+
+            round_by_round_bids.append(iter_round_bids)
+            round_by_round_dispatch.append(iter_round_dispatch)
+            round_by_round_prices.append(iter_round_prices)
+            round_by_round_profits.append(iter_round_profits)
 
             # --- Convergence check ---
             if iter > 5:
@@ -246,6 +285,11 @@ class EPEC:
             weight_history,
             converged,
             not_converged,
+            player_order_history,
+            round_by_round_bids,
+            round_by_round_dispatch,
+            round_by_round_prices,
+            round_by_round_profits
         )
 
     def run_best_response_ownership(self, owner_indexes, run_id):
@@ -367,7 +411,7 @@ class EPEC:
             clearing_price_history,
             weight_history,
             converged,
-            not_converged,
+            not_converged
         )
 
     def _build_model(self, index_strategic, cost_vector, init_cost_vector):

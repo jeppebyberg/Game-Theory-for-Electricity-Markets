@@ -36,12 +36,17 @@ max_iter = 100
 demand = 150
 convergence_tol = 0.003
 
+# --- TOGGLE VERBOSE OUTPUT ---
+VERBOSE = True  # Set to False to disable detailed iteration printouts
+
 # Initialize EPEC
 epec = EPEC(alpha_min, alpha_max, 
             Pmin, Pmax, demand, 
             cost_min, cost_max, 
-            segments, 
-            max_iter, convergence_tol)
+            segments,
+            cost_ownership=None, 
+            max_iter = max_iter, 
+            convergence_tol = convergence_tol)
 
 # Run single best response with cost_fix as initial cost vector
 print("\n" + "="*100)
@@ -50,107 +55,92 @@ print("="*100)
 print(f"Initial truthful costs: {cost_fix}")
 print(f"Demand: {demand} MW")
 print(f"Max iterations: {max_iter}")
+print(f"Verbose output: {'ENABLED' if VERBOSE else 'DISABLED'}")
 print("="*100 + "\n")
 
-# Store original run_best_response method
-original_run = epec.run_best_response
+# Use EPEC's built-in run_best_response method
+(profit_history, alpha_history, dispatch_history, iterations, PoA, 
+ dispatch_ED, clearing_price_ED, final_dispatch, final_bid, clearing_price_SP, 
+ clearing_price_history, weight_history, converged, not_converged, 
+ player_order_history, round_by_round_bids, round_by_round_dispatch, 
+ round_by_round_prices, round_by_round_profits) = epec.run_best_response(
+    np.array(cost_fix), run_id=0
+)
 
-def run_best_response_verbose(init_cost_vector, run_id):
-    # Reset histories for this run
-    profit_history = []
-    alpha_history = []
-    dispatch_history = []
-    convergence_check = []
-    clearing_price_history = []
-    weight_history = []
+# --- VERBOSE OUTPUT: Print all rounds from all iterations ---
+if VERBOSE:
+    print("\n" + "="*100)
+    print("DETAILED ITERATION BREAKDOWN")
+    print("="*100 + "\n")
+    
+    num_generators = len(cost_fix)
+    
+    # Iterate through each iteration
+    for iter_idx in range(len(alpha_history)):
+        # Get the player order for this iteration
+        players_this_iter = player_order_history[iter_idx]
+        
+        # For each player that acted in this iteration
+        for round_idx, strategic_player in enumerate(players_this_iter):
+            
+            bids_after_round = round_by_round_bids[iter_idx][round_idx]
+            dispatch_after_round = round_by_round_dispatch[iter_idx][round_idx]
+            price_after_round = round_by_round_prices[iter_idx][round_idx]
 
-    dispatch_ED, clearing_price_ED, minimum_cost_ED = epec.economic_dispatch(init_cost_vector)
-
-    iter = 0
-    cost_vector = init_cost_vector.copy()
-
-    # Best-response iterations
-    while iter <= epec.max_iter:
-        profit_history.append([None] * epec.num_generators)
-        alpha_history.append([None] * epec.num_generators)
-        dispatch_history.append([None] * epec.num_generators)
-        convergence_check.append([False] * epec.num_generators)
-        weight_history.append([None] * epec.num_generators)
-
-        for i in range(epec.num_generators):
-            epec._build_model(i, cost_vector, init_cost_vector)
-            epec.solve()
-            cost_vector[i] = epec.model.alpha.value
-            profit_history[iter][i] = -epec.model.objective()
-            alpha_history[iter][i] = epec.model.alpha.value
-            dispatch_history[iter] = [epec.model.P_G[ii].value for ii in epec.model.n_gen]
-            clearing_price_SP = epec.model.lambda_dual.value
-            weight_history[iter][i] = [epec.model.omega[ii].value for ii in epec.model.n_gen - epec.model.strategic_index]
-
-            # Print iteration details
             print("="*100)
-            print(f"ITERATION {iter + 1} | ROUND {i + 1} | Strategic Actor: {i}")
+            print(f"ITERATION {iter_idx + 1} | ROUND {round_idx + 1} | Strategic Player: {strategic_player}")
             print("="*100)
             print()
             print(f"{'Generator':<12} {'True Cost':<12} {'MC Dispatch':<15} {'MPEC Bid':<12} {'MPEC Dispatch':<15} {'Markup':<12}")
             print("-"*100)
             
-            for j in range(epec.num_generators):
-                strategic_marker = "*" if j == i else " "
-                true_cost = init_cost_vector[j]
+            for j in range(num_generators):
+                strategic_marker = "*" if j == strategic_player else " "
+                true_cost = cost_fix[j]
                 mc_dispatch = dispatch_ED[j]
-                mpec_bid = cost_vector[j]
-                mpec_dispatch = dispatch_history[iter][j]
+                mpec_bid = bids_after_round[j]
+                mpec_dispatch = dispatch_after_round[j]
                 markup = mpec_bid - true_cost
                 markup_sign = "+" if markup >= 0 else ""
                 
                 print(f"G{j} {strategic_marker:<10} ${true_cost:<11.2f} {mc_dispatch:<15.2f} ${mpec_bid:<11.2f} {mpec_dispatch:<15.2f} ${markup_sign}{markup:.2f}")
             
             print("-"*100)
-            print(f"\nClearing Price: ${clearing_price_SP:.2f}")
-            print()
-
-            if iter > 0:
-                if profit_history[iter][i] >= (1 - epec.convergence_tol) * profit_history[iter - 1][i] and profit_history[iter][i] <= (1 + epec.convergence_tol) * profit_history[iter - 1][i]:
-                    convergence_check[iter][i] = True
-
-        clearing_price_history.append(clearing_price_SP)
-
-        if all(convergence_check[iter]):
-            print("\n" + "="*100)
-            print(f"✅ CONVERGED AFTER {iter} ITERATIONS")
-            print("="*100 + "\n")
-            PoA = clearing_price_SP * epec.demand / minimum_cost_ED
-            final_bid = cost_vector.copy()
-            final_dispatch = dispatch_history[iter]
-            break
-        if iter == epec.max_iter:
-            print(f"\n⚠️  Reached max iterations - {epec.max_iter}.\n")
-            PoA = clearing_price_SP * epec.demand / minimum_cost_ED
+            print(f"\nMarket Clearing Price:         MC: ${clearing_price_ED:.2f}/MWh  |  MPEC: ${price_after_round:.2f}/MWh")
             
-            # Compute mean of last 10 dispatches 
-            dispatch_array = np.array(dispatch_history[-10:])
-            mean_dispatch = np.mean(dispatch_array, axis=0)
-            final_dispatch = mean_dispatch
+            if iter_idx > 0 or round_idx > 0:
+                price_increase = clearing_price_history[iter_idx] - clearing_price_ED
+                pct_increase = (price_increase / clearing_price_ED * 100) if clearing_price_ED > 0 else 0
+                print(f"Price Increase:                ${price_increase:.2f}/MWh ({pct_increase:+.2f}%)")
+            
+            # Calculate profit for strategic player
+            strategic_profit = (price_after_round * dispatch_after_round[strategic_player] 
+                              - cost_fix[strategic_player] * dispatch_after_round[strategic_player])
+            print(f"Strategic Player Profit:       ${strategic_profit:.2f}")
 
-            bid_array = np.array(alpha_history[-10:])
-            mean_bid = np.mean(bid_array, axis=0)
-            final_bid = mean_bid
-            break
-        iter += 1
+            # Total generation cost comparison
+            mc_total_cost = sum(cost_fix[i] * dispatch_ED[i] for i in range(num_generators))
+            mpec_total_cost = sum(cost_fix[i] * dispatch_after_round[i] for i in range(num_generators))
+            print(f"Total Generation Cost:         MC: ${mc_total_cost:.2f}  |  MPEC: ${mpec_total_cost:.2f}")
+            print()
     
-    return profit_history, alpha_history, dispatch_history, iter, PoA, dispatch_ED, clearing_price_ED, final_dispatch, final_bid, clearing_price_SP, clearing_price_history, weight_history
+    print("="*100)
+    print("END OF DETAILED BREAKDOWN")
+    print("="*100 + "\n")
 
-# Replace method temporarily
-profits, alphas, dispatches, iterations, PoA, dispatch_ED, clearing_price_ED, final_dispatch, final_bid, clearing_price_SP, clearing_price_history, weight_history = run_best_response_verbose(np.array(cost_fix), run_id=0)
-
-# --- PLOT 1: Alpha evolution for each player ---
-alphas_array = np.array(alphas)
+# Extract data for plotting
+alphas = np.array(alpha_history)
+dispatches = np.array(dispatch_history)
 num_generators = len(cost_fix)
 
+print("\n" + "="*100)
+print("GENERATING PLOTS")
+print("="*100 + "\n")
+
+# --- PLOT 1: Alpha evolution for each player ---
 plt.figure(figsize=(10, 6))
 for i in range(num_generators):
-    plt.plot(alphas_array[:, i], marker='o', label=f'G{i}', linewidth=2)
+    plt.plot(alphas[:, i], marker='o', label=f'G{i}', linewidth=2)
 
 # Add horizontal lines for truthful costs and final bids (lighter, no labels)
 for i in range(num_generators):
@@ -196,11 +186,9 @@ plt.savefig(outputs_dir / 'dispatch_comparison.png', dpi=300, bbox_inches='tight
 plt.show()
 
 # --- PLOT 3: Dispatch evolution over iterations ---
-dispatches_array = np.array(dispatches)
-
 plt.figure(figsize=(10, 6))
 for i in range(num_generators):
-    plt.plot(dispatches_array[:, i], marker='o', label=f'G{i}', linewidth=2)
+    plt.plot(dispatches[:, i], marker='o', label=f'G{i}', linewidth=2)
 
 # Add horizontal lines for central and final dispatch (lighter, no labels)
 for i in range(num_generators):
@@ -226,6 +214,82 @@ plt.tight_layout()
 plt.savefig(outputs_dir / 'dispatch_evolution.png', dpi=300, bbox_inches='tight')
 plt.show()
 
+# --- PLOT 4: Market Clearing Price per Round across Iterations ---
+plt.figure(figsize=(12, 6))
+
+# Organize prices by round (one line per strategic player position)
+for round_idx in range(num_generators):
+    prices_for_round = []
+    iterations_list = []
+    
+    for iter_idx in range(len(round_by_round_prices)):
+        if round_idx < len(round_by_round_prices[iter_idx]):
+            prices_for_round.append(round_by_round_prices[iter_idx][round_idx])
+            iterations_list.append(iter_idx + 1)
+    
+    # Get which player acted in this round for labeling
+    player_label = f'Round {round_idx + 1}'
+    plt.plot(iterations_list, prices_for_round, marker='o', label=player_label, linewidth=2)
+
+# Add horizontal line for central clearing price
+plt.axhline(y=clearing_price_ED, color='black', linestyle='--', linewidth=2, alpha=0.5, label='Central Price')
+
+plt.xlabel('Iteration')
+plt.ylabel('Market Clearing Price ($/MWh)')
+plt.title('Market Clearing Price After Each Strategic Round')
+plt.legend(loc='best')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig(outputs_dir / 'price_by_round.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# --- PLOT 5: Strategic Player Profit After Their Round across Iterations ---
+plt.figure(figsize=(12, 6))
+
+# Organize profits by which player was strategic (one line per player)
+for player_idx in range(num_generators):
+    profits_for_player = []
+    iterations_list = []
+    
+    for iter_idx in range(len(player_order_history)):
+        players_this_iter = player_order_history[iter_idx]
+        # Find which round this player acted in
+        if player_idx in players_this_iter:
+            round_idx = players_this_iter.index(player_idx)
+            profit = round_by_round_profits[iter_idx][round_idx]
+            profits_for_player.append(profit)
+            iterations_list.append(iter_idx + 1)
+    
+    plt.plot(iterations_list, profits_for_player, marker='o', label=f'G{player_idx}', linewidth=2)
+
+plt.xlabel('Iteration')
+plt.ylabel('Profit After Strategic Round ($)')
+plt.title('Strategic Player Profit After Their Round')
+plt.legend(loc='best')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig(outputs_dir / 'strategic_profit_by_round.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# --- PLOT 6: Final Profits for Each Generator across Iterations ---
+plt.figure(figsize=(12, 6))
+
+# profit_history contains end-of-iteration profits for all generators
+profits_array = np.array(profit_history)
+
+for i in range(num_generators):
+    plt.plot(range(1, len(profit_history) + 1), profits_array[:, i], 
+             marker='o', label=f'G{i}', linewidth=2)
+
+plt.xlabel('Iteration')
+plt.ylabel('Final Profit (End of Iteration) ($)')
+plt.title('Generator Profits at End of Each Iteration')
+plt.legend(loc='best')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig(outputs_dir / 'final_profits_per_iteration.png', dpi=300, bbox_inches='tight')
+plt.show()
+
 # --- COMPUTE INEFFICIENCY ---
 # Central dispatch cost (numerator in PoA calculation)
 central_cost = sum(cost_fix[i] * dispatch_ED[i] for i in range(num_generators))
@@ -239,7 +303,8 @@ inefficiency = equilibrium_cost / central_cost
 print("=" * 60)
 print("RESULTS")
 print("=" * 60)
-print(f"Converged after {iterations} iterations")
+print(f"Convergence status: {'Converged' if converged else 'Not converged'}")
+print(f"Total iterations: {iterations}")
 print()
 print("Truthful costs:", cost_fix)
 print("Final bids:", [f"{bid:.2f}" for bid in final_bid])
@@ -254,4 +319,5 @@ print("INEFFICIENCY CALCULATION:")
 print(f"  Numerator (Equilibrium cost):   {equilibrium_cost:.2f}")
 print(f"  Denominator (Central cost):     {central_cost:.2f}")
 print(f"  Inefficiency (PoA):             {inefficiency:.4f}")
+print(f"  PoA (from EPEC):                {PoA:.4f}")
 print("=" * 60)
