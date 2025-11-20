@@ -101,7 +101,8 @@ class EPEC:
         for run_id, owner_indexes in enumerate(all_combinations):
             (profits, alphas, dispatches, iterations, PoA, dispatch_ED, 
              clearing_price_ED, final_dispatch, final_bid, clearing_price_SP, 
-             clearing_price_history, weight_history, converged, not_converged
+             clearing_price_history, weight_history, converged, not_converged,
+             actor_profit_history
              ) = self.run_best_response_ownership(owner_indexes, run_id)
             if converged:
                 converged_runs += 1
@@ -295,6 +296,7 @@ class EPEC:
     def run_best_response_ownership(self, owner_indexes, run_id):
         profit_history, alpha_history, dispatch_history = [], [], []
         convergence_check, clearing_price_history, weight_history = [], [], []
+        actor_profit_history = []
 
         init_cost_vector = self.cost_ownership
 
@@ -312,6 +314,9 @@ class EPEC:
             convergence_check.append([False] * self.num_generators)
             weight_history.append([None] * self.num_generators)
 
+            # Track profit for each actor: owner + individual competitors
+            num_actors = 1 + len([i for i in range(self.num_generators) if i not in owner_indexes])
+            actor_profit_history.append([None] * num_actors)
 
             ######## Jacobi Method ########
             # # --- Compute new best responses ---
@@ -360,29 +365,56 @@ class EPEC:
                     - init_cost_vector[j] * dispatch_round[j]
                 )
 
+            # --- Calculate actor-level profits ---
+            # Actor 0: the owner (combines all owned generators)
+            owner_profit = sum(profit_history[iter][g] for g in owner_indexes)
+            actor_profit_history[iter][0] = owner_profit
+
+            # Actors 1+: individual competitors
+            actor_idx = 1
+            for j in range(self.num_generators):
+                if j not in owner_indexes:
+                    actor_profit_history[iter][actor_idx] = profit_history[iter][j]
+                    actor_idx += 1
+
             # --- Convergence check ---
             if iter > 5:
-                for j in range(self.num_generators):
-                    prev_profit = profit_history[iter - 1][j]
-                    curr_profit = profit_history[iter][j]
-                    # curr_clearing_price = clearing_price_history[-1]
-                    # prev_clearing_price = clearing_price_history[-2]
-                    curr_bid = alpha_history[iter][j]
-                    prev_bid = alpha_history[iter - 1][j]
-                    if (
-                        curr_profit >= prev_profit * (1 - self.convergence_tol)
-                        and curr_profit <= prev_profit * (1 + self.convergence_tol)
-                        # and curr_clearing_price >= prev_clearing_price * (1 - self.convergence_tol)
-                        # and curr_clearing_price <= prev_clearing_price * (1 + self.convergence_tol)
-                        and curr_bid >= prev_bid * (1 - self.convergence_tol)
-                        and curr_bid <= prev_bid * (1 + self.convergence_tol)
-                    ):
-                        convergence_check[iter][j] = True
+                num_actors = len(actor_profit_history[iter])
+                actor_converged = [False] * num_actors
+                
+                for actor_idx in range(num_actors):
+                    prev_profit = actor_profit_history[iter - 1][actor_idx]
+                    curr_profit = actor_profit_history[iter][actor_idx]
+                    
+                    # Check profit convergence for this actor
+                    profit_converged = (
+                        curr_profit >= prev_profit * (1 - self.convergence_tol) and
+                        curr_profit <= prev_profit * (1 + self.convergence_tol)
+                    )
+                    
+                    # Check bid convergence for this actor's generators
+                    if actor_idx == 0:
+                        # Owner: check all owned generators' bids
+                        bids_converged = all(
+                            alpha_history[iter][g] >= alpha_history[iter-1][g] * (1 - self.convergence_tol) and
+                            alpha_history[iter][g] <= alpha_history[iter-1][g] * (1 + self.convergence_tol)
+                            for g in owner_indexes
+                        )
                     else:
-                        convergence_check[iter][j] = False
-
-                if all(convergence_check[iter]):
+                        # Competitor: find which generator this actor owns
+                        competitors = [i for i in range(self.num_generators) if i not in owner_indexes]
+                        gen_idx = competitors[actor_idx - 1]
+                        bids_converged = (
+                            alpha_history[iter][gen_idx] >= alpha_history[iter-1][gen_idx] * (1 - self.convergence_tol) and
+                            alpha_history[iter][gen_idx] <= alpha_history[iter-1][gen_idx] * (1 + self.convergence_tol)
+                        )
+                    
+                    actor_converged[actor_idx] = profit_converged and bids_converged
+                
+                # Check if all actors have converged
+                if all(actor_converged):
                     print(f"Run id: {run_id} - Converged after {iter} full rounds.")
+                    print(f"  Owner profit: ${actor_profit_history[iter][0]:.2f}")
                     converged = True
                     break
             if iter == self.max_iter:
@@ -411,7 +443,8 @@ class EPEC:
             clearing_price_history,
             weight_history,
             converged,
-            not_converged
+            not_converged,
+            actor_profit_history
         )
 
     def _build_model(self, index_strategic, cost_vector, init_cost_vector):
@@ -622,7 +655,7 @@ class EPEC:
         else:
             print("Solver status:", results.solver.status)
             print("Termination condition:", results.solver.termination_condition)
-
+    
     def plot_merit_order_curve(self, run_id):
         if "owner_indexes" not in self.results[run_id]:
             owner_indexes = set()
@@ -644,59 +677,47 @@ class EPEC:
         gen_sorted_costs = cost_array[gen_sorted_idx]
         gen_sorted_caps = pmax_array[gen_sorted_idx]
 
-        plt.figure(figsize=(10, 6))
+        plt.figure(figsize=(12, 7))
 
         gen_curve_x = [0]
         gen_curve_y = [0]
         cum_cap = 0
+        
         for idx, (c, cap) in zip(gen_sorted_idx, zip(gen_sorted_costs, gen_sorted_caps)):
-            # Add bold / color highlight for owned generators
-            if idx in owner_indexes:
-                label_color = "red"
-                font_weight = "bold"
-            else:
-                label_color = "blue"
-                font_weight = "normal"
-
             gen_curve_x.append(cum_cap)
             gen_curve_y.append(c)
-
             cum_cap += cap
-
             gen_curve_x.append(cum_cap)
             gen_curve_y.append(c)
 
             midpoint = cum_cap - cap / 2
             
-            # Highlight ownership
+            # ED labels - positioned ABOVE the curve
             if idx in owner_indexes:
-                y_offset = -2
-                label_color = "red"
+                label_color = "darkblue"
                 font_weight = "bold"
-                label_text = "Generator owned"   
+                label_text = f"G{idx}*"  # Add asterisk for owned generators
             else:
-                y_offset = -0.2
-                label_color = "blue"
+                label_color = "darkblue"
                 font_weight = "normal"
-                label_text = f"G{idx}"           
+                label_text = f"G{idx}"
 
             plt.text(
                 midpoint,
-                c + y_offset,
-                label_text,                     
+                c + 5,  # Position above the curve
+                label_text,
                 ha="center",
-                va="bottom" if y_offset > 0 else "top",
-                fontsize=9,
+                va="bottom",
+                fontsize=10,
                 color=label_color,
                 fontweight=font_weight,
             )
 
         # Plot ED supply curve
-        plt.step(gen_curve_x, gen_curve_y, where='post', color='blue', label='Supply (ED)')
+        plt.step(gen_curve_x, gen_curve_y, where='post', color='blue', linewidth=2, label='Supply (ED)')
 
         # --- Strategic Producer Case ---
         sp_costs = np.array(cost_vector)
-
         gen_sorted_idx_SP = np.argsort(sp_costs)
         gen_sorted_costs_SP = sp_costs[gen_sorted_idx_SP]
         gen_sorted_caps_SP = pmax_array[gen_sorted_idx_SP]
@@ -704,6 +725,7 @@ class EPEC:
         gen_curve_x_SP = [0]
         gen_curve_y_SP = [0]
         cum_cap_SP = 0
+        
         for idx, (c, cap) in zip(gen_sorted_idx_SP, zip(gen_sorted_costs_SP, gen_sorted_caps_SP)):
             gen_curve_x_SP.append(cum_cap_SP)
             gen_curve_y_SP.append(c)
@@ -711,52 +733,61 @@ class EPEC:
             gen_curve_x_SP.append(cum_cap_SP)
             gen_curve_y_SP.append(c)
 
-            # Label under SP supply line
+            # SP labels - positioned BELOW the curve
             midpoint_SP = cum_cap_SP - cap / 2
-            plt.text(midpoint_SP, c - 0.2, f"G{idx}", ha='center', va='top', fontsize=8, color="purple")
+            
+            if idx in owner_indexes:
+                label_color_SP = "darkred"
+                font_weight_SP = "bold"
+                label_text_SP = f"G{idx}*"
+            else:
+                label_color_SP = "purple"
+                font_weight_SP = "normal"
+                label_text_SP = f"G{idx}"
+            
+            plt.text(
+                midpoint_SP, 
+                c - 8,  # Position below the curve
+                label_text_SP, 
+                ha='center', 
+                va='top', 
+                fontsize=10, 
+                color=label_color_SP,
+                fontweight=font_weight_SP
+            )
 
         # Plot SP supply curve
-        plt.step(gen_curve_x_SP, gen_curve_y_SP, where='post', color='purple', linestyle='--', label='Supply (SP)')
+        plt.step(gen_curve_x_SP, gen_curve_y_SP, where='post', color='purple', linestyle='--', linewidth=2, label='Supply (SP)')
 
         # --- Demand ---
         demand = self.demand
-        plt.axvline(demand, color='red', linestyle='--', label=f'Demand = {demand}')
+        plt.axvline(demand, color='red', linestyle='--', linewidth=2, label=f'Demand = {demand}')
 
         # --- Clearing prices ---
-        plt.scatter([demand], [clearing_price_ED], color='green', zorder=5, marker='o', label=f'ED Price = {clearing_price_ED:.2f}', s = 100)
-        plt.scatter([demand], [clearing_price_SP], color='magenta', zorder=5, marker='x', label=f'SP Price = {clearing_price_SP:.2f}', s = 100)
+        plt.scatter([demand], [clearing_price_ED], color='green', zorder=5, marker='o', 
+                    label=f'ED Price = {clearing_price_ED:.2f}', s=150, edgecolors='black', linewidths=2)
+        plt.scatter([demand], [clearing_price_SP], color='magenta', zorder=5, marker='x', 
+                    label=f'SP Price = {clearing_price_SP:.2f}', s=150, linewidths=3)
 
         # --- Formatting ---
-        plt.xlabel('Quantity')
-        plt.ylabel('Price')
-        plt.title(f'Merit Order Curve: ED vs Strategic Producer. Run ID: {run_id}')
-        plt.legend()
-        plt.grid(True)
+        plt.xlabel('Quantity (MW)', fontsize=12, fontweight='bold')
+        plt.ylabel('Price ($/MWh)', fontsize=12, fontweight='bold')
+        # Add ownership info to title if applicable
+        if owner_indexes:
+            owned_gens = ', '.join([f'G{i}' for i in sorted(owner_indexes)])
+            plt.title(f'Merit Order Curve: ED vs Strategic Producer. Run ID: {run_id}\n'
+                    f'Owned generators: {owned_gens} (marked with *)', 
+                    fontsize=14, fontweight='bold')
+        else:
+            plt.title(f'Merit Order Curve: ED vs Strategic Producer. Run ID: {run_id}', 
+                    fontsize=14, fontweight='bold')
+
+        plt.legend(bbox_to_anchor=(0.5, -0.12), loc='upper center', 
+                fontsize=10, ncol=3, framealpha=0.9)
+        plt.grid(True, alpha=0.3)
         plt.tight_layout()
+        plt.subplots_adjust(bottom=0.25)
         plt.show()
-
-        # Print comparison
-        print("Dispatch Comparison (ED vs SP):")
-        print("  Gen   Cost(ED)  Cost(SP)   ED [MW]   SP [MW]")
-        print("  ---  --------- ---------  --------  --------")
-
-        for i in range(len(cost_array)):
-            # In SP case, replace strategic cost with alpha
-            cost_sp = sp_costs[i]
-
-            line = (
-                f"  {i:2d}   "
-                f"{init_cost_vector[i]:9.2f} "
-                f"{cost_sp:9.5f} "
-                f"{dispatch_ED[i]:8.2f}  "
-                f"{dispatch_SP[i]:8.2f}"
-            )
-            print(line)
-
-        print()
-        print(f"  Clearing price (ED)           : {clearing_price_ED:8.2f}")
-        print(f"  Clearing price (SP)           : {clearing_price_SP:8.2f}")
-        print()
 
     def plot_alpha_over_iterations(self, run_id):
         alpha_history = self.results[run_id]['alpha_history']
@@ -860,16 +891,127 @@ class EPEC:
     def plot_profits(self, run_id):
         profit_history = self.results[run_id]['profit_history']
 
+        # Check if this is an ownership scenario
+        if "owner_indexes" in self.results[run_id]:
+            owner_indexes = set(self.results[run_id]['owner_indexes'])
+        else:
+            owner_indexes = set()
+
         profit_history = np.array(profit_history)
         plt.figure(figsize=(10, 6))
+        
         for i in range(self.num_generators):
-            plt.plot(profit_history[:, i], marker='o', label=f'Generator {i}')
-        plt.xlabel('Iteration')
-        plt.ylabel('Profit')
-        plt.title('Profit Evolution Over Iterations')
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.grid(True)
+            # Add asterisk for owned generators
+            label = f'Generator {i}*' if i in owner_indexes else f'Generator {i}'
+            plt.plot(profit_history[:, i], marker='o', label=label)
+        
+        plt.xlabel('Iteration', fontsize=12, fontweight='bold')
+        plt.ylabel('Profit ($)', fontsize=12, fontweight='bold')
+        
+        # Add ownership info to title
+        if owner_indexes:
+            owned_gens = ', '.join([f'G{i}' for i in sorted(owner_indexes)])
+            plt.title(f'Profit Evolution Over Iterations - Run ID: {run_id}\n'
+                    f'Generators marked with * are owned together: {owned_gens}', 
+                    fontsize=13, fontweight='bold')
+        else:
+            plt.title(f'Profit Evolution Over Iterations - Run ID: {run_id}', 
+                    fontsize=13, fontweight='bold')
+        
+        plt.legend(bbox_to_anchor=(0.5, -0.12), loc='upper center', 
+                ncol=4, framealpha=0.9, fontsize=10)
+        plt.grid(True, alpha=0.3)
         plt.tight_layout()
+        plt.subplots_adjust(bottom=0.25)  # Make room for legend below
+        plt.show()
+
+    def plot_actor_profits(self, run_id):
+        """
+        Plot actor-level profits over iterations for ownership scenarios.
+        Shows the owner's combined profit and each competitor's individual profit.
+        """
+        if "owner_indexes" not in self.results[run_id]:
+            print(f"Run {run_id} is not an ownership scenario. Use plot_profits() instead.")
+            return
+        
+        owner_indexes = self.results[run_id]['owner_indexes']
+        profit_history = self.results[run_id]['profit_history']
+        iterations = self.results[run_id]['iterations']
+        
+        # Calculate actor profits for each iteration
+        actor_profit_history = []
+        
+        for iter_profits in profit_history:
+            # Owner profit: sum of all owned generators
+            owner_profit = sum(iter_profits[g] for g in owner_indexes if iter_profits[g] is not None)
+            
+            # Competitor profits: individual generators not owned
+            competitor_profits = [
+                iter_profits[g] for g in range(self.num_generators) 
+                if g not in owner_indexes and iter_profits[g] is not None
+            ]
+            
+            actor_profit_history.append([owner_profit] + competitor_profits)
+        
+        # Transpose to get profit trajectories per actor
+        num_iters = len(actor_profit_history)
+        num_actors = len(actor_profit_history[0])
+        
+        actor_trajectories = []
+        for actor_idx in range(num_actors):
+            trajectory = [actor_profit_history[iter_idx][actor_idx] 
+                        for iter_idx in range(num_iters)]
+            actor_trajectories.append(trajectory)
+        
+        # Create the plot
+        plt.figure(figsize=(12, 7))
+        
+        # Plot owner profit (Actor 0)
+        owned_gens = ', '.join([f'G{i}' for i in sorted(owner_indexes)])
+        plt.plot(range(1, num_iters + 1), actor_trajectories[0], 
+                marker='o', linewidth=2.5, markersize=8, 
+                label=f'Owner (owns {owned_gens})', 
+                color='red', linestyle='-', alpha=0.8)
+        
+        # Plot competitor profits (Actors 1+)
+        competitors = [i for i in range(self.num_generators) if i not in owner_indexes]
+        colors = plt.cm.tab10(range(len(competitors)))
+        
+        for actor_idx in range(1, num_actors):
+            gen_idx = competitors[actor_idx - 1]
+            plt.plot(range(1, num_iters + 1), actor_trajectories[actor_idx], 
+                    marker='s', linewidth=2, markersize=6, 
+                    label=f'Competitor G{gen_idx}', 
+                    color=colors[actor_idx - 1], linestyle='--', alpha=0.7)
+        
+        conv_iter = iterations if self.results[run_id]['converged'] else None
+        
+        # Formatting
+        plt.xlabel('Iteration', fontsize=13, fontweight='bold')
+        plt.ylabel('Profit ($)', fontsize=13, fontweight='bold')
+        conv_text = f' (Converged at iteration {conv_iter})' if conv_iter else ' (Did not converge)'
+        plt.title(f'Actor Profits Over Iterations - Run ID: {run_id}{conv_text}\n'
+                f'Owner controls: {owned_gens}', 
+                fontsize=14, fontweight='bold')
+        plt.legend(bbox_to_anchor=(0.5, -0.15), loc='upper center', 
+          fontsize=10, framealpha=0.9, ncol=3)
+        plt.grid(True, alpha=0.3, linestyle='--')
+        
+        # Add summary statistics box
+        final_owner_profit = actor_trajectories[0][-1]
+        total_competitor_profit = sum(traj[-1] for traj in actor_trajectories[1:])
+        
+        textstr = f'Final Profits:\n'
+        textstr += f'Owner: ${final_owner_profit:.2f}\n'
+        textstr += f'All Competitors: ${total_competitor_profit:.2f}\n'
+        textstr += f'Owner Share: {final_owner_profit/(final_owner_profit+total_competitor_profit)*100:.1f}%'
+        
+        props = dict(boxstyle='round', facecolor='wheat', alpha=0.8, edgecolor='black', linewidth=1.5)
+        plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes, 
+                fontsize=10, verticalalignment='top', bbox=props)
+        
+        plt.tight_layout()
+        plt.subplots_adjust(bottom=0.25)
         plt.show()
 
 def generate_scaled_setup(n_players: int, base_demand=100):
@@ -1007,6 +1149,7 @@ if __name__ == "__main__":
     for run_id in epec.results:
         epec.plot_merit_order_curve(run_id = run_id)
         epec.plot_profits(run_id = run_id)
+        epec.plot_actor_profits(run_id=run_id)
 
     # # # epec.plot_clearing_price_over_iterations(run_id = 0)
     # # # epec.plot_alpha_over_iterations(run_id = 0)
