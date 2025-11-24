@@ -4,6 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import itertools
 import random
+import os
+import csv
 
 class EPEC:
     def __init__(self, 
@@ -133,6 +135,15 @@ class EPEC:
             ((id, res['PoA']) for id, res in self.results.items()),
             key=lambda x: x[1]
         )
+        
+        #convert results to csv
+        file_path = os.path.join(os.path.dirname(__file__), "results_175_7_0.csv")
+        with open(file_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Key", "Value"])
+            for key, value in self.results.items():
+                writer.writerow([key, value])
+
 
         print(f"Worst PoA: {worst_poa:.2f} (from run id {worst_id})")
         return share_converged, worst_poa
@@ -415,6 +426,8 @@ class EPEC:
                 if all(actor_converged):
                     print(f"Run id: {run_id} - Converged after {iter} full rounds.")
                     print(f"  Owner profit: ${actor_profit_history[iter][0]:.2f}")
+                    print(f"  Competitor profits: {[actor_profit_history[iter][i] for i in range(1, num_actors)]}")
+                    print(f"  Owner share of total profit: {100 * actor_profit_history[iter][0] / sum(actor_profit_history[iter]):.2f}%")
                     converged = True
                     break
             if iter == self.max_iter:
@@ -1124,17 +1137,17 @@ if __name__ == "__main__":
     alpha_min = 0
     alpha_max = 1200
     
-    Pmin = [0, 0, 0, 0, 0]
-    Pmax = [30, 30, 30, 30, 30]
+    Pmin = [0, 0, 0, 0,0, 0,0]
+    Pmax = [30, 30, 30,30, 30,30,30]
 
-    cost_min = [200, 250, 300, 350, 400]
+    cost_min = [1,1.5,2.5,24,25,27.5,29]
     cost_max = [c * 2 for c in cost_min]
     segments = 2
 
-    cost_ownership = [250, 300, 350, 400, 450]  # example ownership costs
+    cost_ownership = [1,1.5,2.5,24,25,27.5,29]  # example ownership costs
 
     max_iter = 150
-    demand = 75
+    demand = 175
 
     convergence_tol = 0.001
 
@@ -1146,10 +1159,11 @@ if __name__ == "__main__":
                 max_iter = max_iter, convergence_tol = convergence_tol)
     
     epec.iterate_ownership_combinations(2)
-    for run_id in epec.results:
-        epec.plot_merit_order_curve(run_id = run_id)
-        epec.plot_profits(run_id = run_id)
-        epec.plot_actor_profits(run_id=run_id)
+   
+    #for run_id in epec.results:
+     #   epec.plot_merit_order_curve(run_id = run_id)
+     #   epec.plot_profits(run_id = run_id)
+     #   epec.plot_actor_profits(run_id=run_id)
 
     # # # epec.plot_clearing_price_over_iterations(run_id = 0)
     # # # epec.plot_alpha_over_iterations(run_id = 0)
