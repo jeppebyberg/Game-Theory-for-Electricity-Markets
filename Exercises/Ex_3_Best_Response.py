@@ -40,13 +40,12 @@ convergence_tol = 0.003
 VERBOSE = True  # Set to False to disable detailed iteration printouts
 
 # Initialize EPEC
-epec = EPEC(Pmin, Pmax, 
-            demand, 
-            cost_min, 
-            segments,
-            cost_ownership=None, 
-            max_iter = max_iter, 
-            convergence_tol = convergence_tol)
+epec = EPEC(alpha_min, alpha_max, 
+            Pmin, Pmax, demand, 
+            cost_min, cost_max, 
+            segments, 
+            max_iter=max_iter, 
+            convergence_tol=convergence_tol)
 
 # Run single best response with cost_fix as initial cost vector
 print("\n" + "="*100)
@@ -159,7 +158,7 @@ all_labels = labels + ['Truthful cost', 'Final bid']
 
 plt.xlabel('Iteration k')
 plt.ylabel('Bid α_i(k)')
-plt.title('Bid Evolution Over Iterations')
+# plt.title('Bid Evolution Over Iterations')
 plt.legend(all_handles, all_labels, loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=3)
 plt.grid(True)
 plt.tight_layout()
@@ -176,7 +175,7 @@ bars2 = ax.bar(x + width/2, final_dispatch, width, label='Equilibrium Dispatch (
 
 ax.set_xlabel('Generator')
 ax.set_ylabel('Dispatch (MW)')
-ax.set_title('Dispatch Comparison: Central vs Equilibrium')
+# ax.set_title('Dispatch Comparison: Central vs Equilibrium')
 ax.set_xticks(x)
 ax.set_xticklabels([f'G{i}' for i in range(num_generators)])
 ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=2)
@@ -207,7 +206,7 @@ all_labels = labels + ['Central dispatch', 'Final dispatch']
 
 plt.xlabel('Iteration k')
 plt.ylabel('Dispatch p_i(k) [MW]')
-plt.title('Dispatch Evolution Over Iterations')
+# plt.title('Dispatch Evolution Over Iterations')
 plt.legend(all_handles, all_labels, loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=3)
 plt.grid(True)
 plt.tight_layout()
@@ -236,7 +235,7 @@ plt.axhline(y=clearing_price_ED, color='black', linestyle='--', linewidth=2, alp
 
 plt.xlabel('Iteration')
 plt.ylabel('Market Clearing Price ($/MWh)')
-plt.title('Market Clearing Price After Each Strategic Round')
+# plt.title('Market Clearing Price After Each Strategic Round')
 plt.legend(loc='best')
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
@@ -264,7 +263,7 @@ for player_idx in range(num_generators):
 
 plt.xlabel('Iteration')
 plt.ylabel('Profit After Strategic Round ($)')
-plt.title('Strategic Player Profit After Their Round')
+# plt.title('Strategic Player Profit After Their Round')
 plt.legend(loc='best')
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
@@ -283,7 +282,7 @@ for i in range(num_generators):
 
 plt.xlabel('Iteration')
 plt.ylabel('Final Profit (End of Iteration) ($)')
-plt.title('Generator Profits at End of Each Iteration')
+# plt.title('Generator Profits at End of Each Iteration')
 plt.legend(loc='best')
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
@@ -321,3 +320,50 @@ print(f"  Denominator (Central cost):     {central_cost:.2f}")
 print(f"  Inefficiency (PoA):             {inefficiency:.4f}")
 print(f"  PoA (from EPEC):                {PoA:.4f}")
 print("=" * 60)
+
+# --- OUTPUT: Export detailed iteration data to CSV ---
+print("\n" + "="*100)
+print("EXPORTING ITERATION DATA TO CSV")
+print("="*100 + "\n")
+
+import csv
+
+num_generators = len(cost_fix)
+
+# Create CSV file with detailed information
+csv_filename = outputs_dir / 'iteration_details.csv'
+
+with open(csv_filename, 'w', newline='') as csvfile:
+    writer = csv.writer(csvfile)
+    
+    # Write header
+    header = ['Iteration', 'Round', 'Strategic_Player', 'Market_Price', 'Strategic_Profit']
+    header += [f'G{i}_Bid' for i in range(num_generators)]
+    header += [f'G{i}_Dispatch' for i in range(num_generators)]
+    writer.writerow(header)
+    
+    # Write data for each iteration and round
+    for iter_idx in range(len(player_order_history)):
+        players_this_iter = player_order_history[iter_idx]
+        
+        for round_idx, strategic_player in enumerate(players_this_iter):
+            bids_after_round = round_by_round_bids[iter_idx][round_idx]
+            dispatch_after_round = round_by_round_dispatch[iter_idx][round_idx]
+            price_after_round = round_by_round_prices[iter_idx][round_idx]
+            profit_after_round = round_by_round_profits[iter_idx][round_idx]
+            
+            row = [
+                iter_idx + 1,
+                round_idx + 1,
+                f'G{strategic_player}',
+                f'{price_after_round:.2f}',
+                f'{profit_after_round:.2f}'
+            ]
+            row += [f'{bid:.2f}' for bid in bids_after_round]
+            row += [f'{dispatch:.2f}' for dispatch in dispatch_after_round]
+            
+            writer.writerow(row)
+
+print(f"Detailed iteration data exported to: {csv_filename}")
+print(f"Total rows: {sum(len(players) for players in player_order_history)}")
+print("="*100 + "\n")
