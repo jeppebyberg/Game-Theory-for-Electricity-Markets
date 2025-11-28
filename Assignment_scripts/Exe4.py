@@ -1,7 +1,6 @@
-from EPEC import EPEC
-import numpy as np 
+from Assignment_scripts.EPEC import EPEC
 import matplotlib.pyplot as plt
-from Exe4_utils import generate_scaled_setup
+from Assignment_scripts.Exe4_utils import generate_scaled_setup
 
 def run_multiple_player_setups(max_players: int, P_max_ref: list, cost_ref: list, demand_ref: float):   
 

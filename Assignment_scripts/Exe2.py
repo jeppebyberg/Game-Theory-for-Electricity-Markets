@@ -1,4 +1,4 @@
-from EPEC import EPEC
+from Assignment_scripts.EPEC import EPEC
 
 if __name__ == "__main__":    
     # Exercise 2

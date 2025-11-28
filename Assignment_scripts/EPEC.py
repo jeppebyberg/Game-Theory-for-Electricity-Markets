@@ -6,7 +6,9 @@ import random
 import os
 from typing import List
 import csv
-from config_loader import load_defaults
+import pandas as pd
+from Assignment_scripts.config_loader import load_defaults
+
 
 class EPEC:
     def __init__(self,  
@@ -18,7 +20,7 @@ class EPEC:
                 ):
 
         # Load and assign algorithm parameters from defaults.yaml
-        d = load_defaults("defaults.yaml")
+        d = load_defaults("Assignment_scripts/defaults.yaml")
 
         self.alpha_min       = d["alpha_min"]
         self.alpha_max       = d["alpha_max"]
@@ -124,6 +126,7 @@ class EPEC:
         profit_history, alpha_history, dispatch_history = [], [], []
         convergence_check_1, convergence_check_2, clearing_price_history = [], [], []
         internal_profit_history = []
+        player_order_history = []
 
         dispatch_ED, clearing_price_ED = self.economic_dispatch(cost_vector)
         iter = 0
@@ -144,6 +147,8 @@ class EPEC:
                 random.seed(iter + run_id)
                 random.shuffle(players)                   # randomize update order each iteration
             
+            player_order_history.append(players.copy())
+
             for p in players:
                 self._build_model(p, bid_vector, cost_vector)
                 self.solve()
@@ -236,6 +241,7 @@ class EPEC:
                         "iterations": iter,
                         "PoA": PoA,
                         "PoA_ish": PoA_ish,
+                        "player_order_history": player_order_history,
                         "final_dispatch": final_dispatch,
                         "final_bid": final_bid,
                         "clearing_price": clearing_price_history[-1],
@@ -244,112 +250,6 @@ class EPEC:
                         "clearing_price_ED": clearing_price_ED,
                         "converged": converged,
                     }
-
-    def tmp():
-        # ------------------ ## MAYBE LEAVE OUT ##  ------------------ 
-                        
-        #                 # --- Capture state after this player/actor acts ---
-        #                 dispatch_after_round, clearing_price_after_round, _ = self.economic_dispatch(cost_vector)
-        #                 iter_round_bids.append(cost_vector.copy())
-        #                 iter_round_dispatch.append(dispatch_after_round)
-        #                 iter_round_prices.append(clearing_price_after_round)
-                        
-        #                 # Calculate profit for the strategic player/actor
-        #                 # If p is a single generator (int), calculate its profit
-        #                 # If p is multiple generators (list/tuple/set), calculate total profit for the actor
-        #                 if isinstance(p, (list, tuple, set)):
-        #                     strategic_profit = sum(
-        #                         clearing_price_after_round * dispatch_after_round[g]
-        #                         - cost_vector[g] * dispatch_after_round[g]
-        #                         for g in p
-        #                     )
-        #                 else:
-        #                     strategic_profit = (
-        #                         clearing_price_after_round * dispatch_after_round[p]
-        #                         - cost_vector[p] * dispatch_after_round[p]
-        #                     )
-        #                 iter_round_profits.append(strategic_profit)
-
-        # # ------------------ ## MAYBE LEAVE OUT ##  ------------------ 
-
-
-        #             # --- Market clearing (global consistency) ---
-        #             dispatch_round, clearing_price_round, _ = self.economic_dispatch(cost_vector)
-        #             dispatch_history[iter] = dispatch_round
-        #             clearing_price_history.append(clearing_price_round)
-
-        #             for j in range(self.num_generators):
-        #                 profit_history[iter][j] = (
-        #                     clearing_price_round * dispatch_round[j]
-        #                     - cost_vector[j] * dispatch_round[j]
-        #                 )
-
-        #             round_by_round_bids.append(iter_round_bids)
-        #             round_by_round_dispatch.append(iter_round_dispatch)
-        #             round_by_round_prices.append(iter_round_prices)
-        #             round_by_round_profits.append(iter_round_profits)
-
-        #             # --- Convergence check ---
-        #             if iter > 5:
-        #                 for j in range(self.num_generators):
-        #                     prev_profit = profit_history[iter - 1][j]
-        #                     curr_profit = profit_history[iter][j]
-        #                     # curr_clearing_price = clearing_price_history[-1]
-        #                     # prev_clearing_price = clearing_price_history[-2]
-        #                     curr_bid = alpha_history[iter][j]
-        #                     prev_bid = alpha_history[iter - 1][j]
-        #                     if (
-        #                         curr_profit >= prev_profit * (1 - self.convergence_tol)
-        #                         and curr_profit <= prev_profit * (1 + self.convergence_tol)
-        #                         and curr_bid >= prev_bid * (1 - self.convergence_tol)
-        #                         and curr_bid <= prev_bid * (1 + self.convergence_tol)
-        #                     ):
-        #                         convergence_check[iter][j] = True
-        #                     else:
-        #                         convergence_check[iter][j] = False
-
-        #                 if all(convergence_check[iter]):
-        #                     print(f"Run id: {run_id} - Converged after {iter} full rounds.")
-        #                     converged = True
-                            
-        #                     break
-        #             iter += 1
-        #             if iter == self.max_iter:
-        #                 print(f"Run id: {run_id} - Reached maximum iterations {self.max_iter} without convergence.")
-
-        #         # --- Final consistent results ---
-
-        #         # MAKE CHANGES TO THIS 
-        #         PoA = clearing_price_round * self.demand / minimum_cost_ED
-        #         # MAKE CHANGES TO THIS 
-
-        #         final_bid = cost_vector.copy()
-        #         final_dispatch = dispatch_round
-
-        #         not_converged = not converged
-
-        #         return (
-        #             profit_history,
-        #             alpha_history,
-        #             dispatch_history,
-        #             iter,
-        #             PoA,
-        #             dispatch_ED,
-        #             clearing_price_ED,
-        #             final_dispatch,
-        #             final_bid,
-        #             clearing_price_round,
-        #             clearing_price_history,
-        #             weight_history,
-        #             converged,
-        #             not_converged,
-        #             player_order_history,
-        #             round_by_round_bids,
-        #             round_by_round_dispatch,
-        #             round_by_round_prices,
-        #             round_by_round_profits
-        #         )
-        pass
 
     def iterate_ownership_combinations(self, ownership_size = 2):
         # Ownership combinations
@@ -638,7 +538,7 @@ class EPEC:
             Array of bid values for each generator - not using the strategic players previous bid.
         cost_vector : List[float]
             Array of cost values for each generator. (Only used in the objective to calculate the profit of the strategic player).
-    """
+        """
 
         self.model = ConcreteModel()
         if isinstance(index_strategic, int):
@@ -1031,8 +931,8 @@ class EPEC:
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.subplots_adjust(bottom=0.25)
-        os.makedirs(f"figures/{self.exercise}/merit_order", exist_ok=True)
-        plt.savefig(f'figures/{self.exercise}/merit_order/merit_order_curve_run_{run_id}.png', dpi=300)
+        os.makedirs(f"Assignment_scripts/figures/{self.exercise}/merit_order", exist_ok=True)
+        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/merit_order/merit_order_curve_run_{run_id}.png', dpi=300)
         # plt.show()
         plt.close()
 
@@ -1051,8 +951,8 @@ class EPEC:
         plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.grid(True)
         plt.tight_layout()
-        os.makedirs(f"figures/{self.exercise}/alpha", exist_ok=True)
-        plt.savefig(f'figures/{self.exercise}/alpha/alpha_evolution_run_{run_id}.png', dpi=300)
+        os.makedirs(f"Assignment_scripts/figures/{self.exercise}/alpha", exist_ok=True)
+        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/alpha/alpha_evolution_run_{run_id}.png', dpi=300)
         plt.close()
 
     def plot_clearing_price_over_iterations(self, run_id):
@@ -1067,8 +967,8 @@ class EPEC:
         plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.grid(True)
         plt.tight_layout()
-        os.makedirs(f"figures/{self.exercise}/clearing_price", exist_ok=True)
-        plt.savefig(f'figures/{self.exercise}/clearing_price/clearing_price_evolution_run_{run_id}.png', dpi=300)
+        os.makedirs(f"Assignment_scripts/figures/{self.exercise}/clearing_price", exist_ok=True)
+        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/clearing_price/clearing_price_evolution_run_{run_id}.png', dpi=300)
         plt.close()
 
     def plot_dispatch_over_iterations(self, run_id):
@@ -1093,8 +993,42 @@ class EPEC:
         plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.grid(True)
         plt.tight_layout()
-        os.makedirs(f"figures/{self.exercise}/dispatch", exist_ok=True)
-        plt.savefig(f'figures/{self.exercise}/dispatch/dispatch_evolution_run_{run_id}.png', dpi=300)
+        os.makedirs(f"Assignment_scripts/figures/{self.exercise}/dispatch", exist_ok=True)
+        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/dispatch/dispatch_evolution_run_{run_id}.png', dpi=300)
+        plt.close()
+
+    def plot_dispatch_comparison(self, run_id):
+        """
+        Creates a bar plot comparing the Economic Dispatch (ED)
+        with the Strategic Equilibrium Dispatch (SP) for one run.
+        """
+
+        result = self.results[run_id]
+
+        dispatch_ED = result["dispatch_ED"]
+        dispatch_SP = result["final_dispatch"]
+
+        num_g = self.num_generators
+        generators = [f"G{i}" for i in range(num_g)]
+
+        x = np.arange(num_g)
+        width = 0.35
+
+        plt.figure(figsize=(12, 6))
+        plt.bar(x - width/2, dispatch_ED, width, label="Economic Dispatch (ED)", color="seagreen")
+        plt.bar(x + width/2, dispatch_SP, width, label="Equilibrium Dispatch (SP)", color="purple")
+
+        plt.xlabel("Generator")
+        plt.ylabel("Dispatch (MW)")
+        plt.title("Dispatch Comparison: Economic vs Equilibrium")
+
+        plt.xticks(x, generators)
+        plt.legend()
+        plt.grid(axis='y', alpha=0.3)
+
+        plt.tight_layout()
+        os.makedirs(f"Assignment_scripts/figures/{self.exercise}/dispatch", exist_ok=True)
+        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/dispatch/dispatch_comparison_run_{run_id}.png', dpi=300)
         plt.close()
 
     def plot_PoA(self):
@@ -1157,8 +1091,8 @@ class EPEC:
 
         # --- Layout ---
         fig.tight_layout()
-        os.makedirs(f"figures/{self.exercise}/PoA", exist_ok=True)
-        plt.savefig(f'figures/{self.exercise}/PoA/PoA_distributions.png', dpi=300)
+        os.makedirs(f"Assignment_scripts/figures/{self.exercise}/PoA", exist_ok=True)
+        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/PoA/PoA_distributions.png', dpi=300)
         plt.close()
 
     def plot_profits(self, run_id):
@@ -1196,8 +1130,8 @@ class EPEC:
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.subplots_adjust(bottom=0.25)  # Make room for legend below
-        os.makedirs(f"figures/{self.exercise}/profits", exist_ok=True)
-        plt.savefig(f'figures/{self.exercise}/profits/profit_evolution_run_{run_id}.png', dpi=300)
+        os.makedirs(f"Assignment_scripts/figures/{self.exercise}/profits", exist_ok=True)
+        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/profits/profit_evolution_run_{run_id}.png', dpi=300)
         plt.close()
         # plt.show()
 
@@ -1288,7 +1222,9 @@ class EPEC:
         
         plt.tight_layout()
         plt.subplots_adjust(bottom=0.25)
-        plt.show()
+        os.makedirs(f"Assignment_scripts/figures/{self.exercise}/actor_profits", exist_ok=True)
+        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/actor_profits/actor_profits_run_{run_id}.png', dpi=300)
+        plt.close()
 
     def plot_merit_order_from_MPEC(self, strategic_index, cost_vector):
 
@@ -1373,9 +1309,71 @@ class EPEC:
         plt.legend(bbox_to_anchor=(0.5, -0.12), loc='upper center', 
                 fontsize=10, ncol=3, framealpha=0.9)
         plt.tight_layout(rect=[0, 0, 1, 0.95])   # extra space if needed
-        os.makedirs(f"figures/{self.exercise}/merit_order_MPEC", exist_ok=True)
-        plt.savefig(f'figures/{self.exercise}/merit_order_MPEC/merit_order_MPEC_demand_{self.demand}.png', dpi=300)
+        os.makedirs(f"Assignment_scripts/figures/{self.exercise}/merit_order_MPEC", exist_ok=True)
+        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/merit_order_MPEC/merit_order_MPEC_demand_{self.demand}.png', dpi=300)
         plt.close()
+
+    def build_iteration_table(self, run_id):
+        """Build iteration-round table exactly like the assignment screenshot."""
+
+        result = self.results[run_id]
+        num_g = self.num_generators
+
+        alpha_hist = result["alpha_history"]
+        dispatch_hist = result["dispatch_history"]
+        profit_hist = result["profit_history"]
+        clearing_hist = result["clearing_price_history"]
+        player_order_hist = result["player_order_history"]  
+
+        rows = []
+
+        for iter_idx, (alphas, dispatches) in enumerate(zip(alpha_hist, dispatch_hist)):
+
+            # skip empty iterations (may appear after convergence)
+            if alphas is None or dispatches is None:
+                continue
+
+            internal_profits = profit_hist[iter_idx]
+
+            # clearing price for iteration
+            if iter_idx < len(clearing_hist):
+                market_price = clearing_hist[iter_idx]
+            else:
+                market_price = clearing_hist[-1]
+
+            # players updated in THIS iteration (actual order)
+            update_order = player_order_hist[iter_idx]
+
+            # one row per round (player update)
+            for round_idx, p in enumerate(update_order):
+
+                row = {
+                    "Iter": iter_idx + 1,
+                    "Rnd": round_idx + 1,
+                    "Strategic Player": f"G{p}",
+                    "Market Price": round(market_price, 3),
+                    "Strategic Profit": (
+                        round(internal_profits[p], 3)
+                        if internal_profits[p] is not None
+                        else None
+                    )
+                }
+
+                # Bids for all generators
+                for g in range(num_g):
+                    row[f"Bid G{g}"] = (
+                        round(alphas[g], 3) if alphas[g] is not None else None
+                    )
+
+                # Dispatch for all generators
+                for g in range(num_g):
+                    row[f"Dispatch G{g}"] = (
+                        round(dispatches[g], 3) if dispatches[g] is not None else None
+                    )
+
+                rows.append(row)
+
+        return pd.DataFrame(rows)
 
 if __name__ == "__main__":
     

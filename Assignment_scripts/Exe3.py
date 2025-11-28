@@ -1,4 +1,4 @@
-from EPEC import EPEC
+from Assignment_scripts.EPEC import EPEC
 
 if __name__ == "__main__":
     
@@ -21,4 +21,10 @@ if __name__ == "__main__":
 
     epec.run_single_experiment()
     epec.plot_merit_order_curve(run_id = 0)
+    epec.plot_dispatch_comparison(run_id = 0)
+    epec.plot_clearing_price_over_iterations(run_id = 0)
+    epec.plot_profits(run_id = 0)
+
+    df = epec.build_iteration_table(run_id=0)
+
 

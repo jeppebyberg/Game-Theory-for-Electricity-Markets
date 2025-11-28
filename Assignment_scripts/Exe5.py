@@ -1,4 +1,4 @@
-from EPEC import EPEC
+from Assignment_scripts.EPEC import EPEC
 
 if __name__ == "__main__":
     
@@ -24,3 +24,5 @@ if __name__ == "__main__":
     for run_id in epec.results:
         epec.plot_merit_order_curve(run_id = run_id)
         epec.plot_clearing_price_over_iterations(run_id = run_id)
+
+    epec.plot_PoA()
