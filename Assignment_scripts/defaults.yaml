@@ -1,0 +1,8 @@
+# Global defaults shared across all scripts
+
+defaults: 
+  max_iter: 150
+  convergence_tol: 0.001
+  alpha_min: 0.0
+  alpha_max: 1200.0
+  heuristic: True

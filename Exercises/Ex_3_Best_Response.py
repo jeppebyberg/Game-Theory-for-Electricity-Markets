@@ -40,9 +40,9 @@ convergence_tol = 0.003
 VERBOSE = True  # Set to False to disable detailed iteration printouts
 
 # Initialize EPEC
-epec = EPEC(alpha_min, alpha_max, 
-            Pmin, Pmax, demand, 
-            cost_min, cost_max, 
+epec = EPEC(Pmin, Pmax, 
+            demand, 
+            cost_min, 
             segments,
             cost_ownership=None, 
             max_iter = max_iter, 
