@@ -1,4 +1,5 @@
 from Assignment_scripts.EPEC import EPEC
+import os
 
 if __name__ == "__main__":
     
@@ -26,5 +27,8 @@ if __name__ == "__main__":
     epec.plot_profits(run_id = 0)
 
     df = epec.build_iteration_table(run_id=0)
+
+    os.makedirs('Assignment_scripts/outputs', exist_ok=True)
+    df.to_csv('Assignment_scripts/outputs/exercise_3_iteration_table.csv', index=False)
 
 
