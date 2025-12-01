@@ -19,7 +19,7 @@ if __name__ == "__main__":
         exercise = "5"
     )
 
-    epec.iterate_ownership_combinations(2)
+    epec.iterate_ownership_combinations(1)
 
     for run_id in epec.results:
         epec.plot_merit_order_curve(run_id = run_id)

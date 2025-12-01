@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import itertools
 import random
 import os
-from typing import List
+from typing import List, Dict
 import csv
 import pandas as pd
 from Assignment_scripts.config_loader import load_defaults
@@ -12,10 +12,10 @@ from Assignment_scripts.config_loader import load_defaults
 
 class EPEC:
     def __init__(self,  
-                 Pmin, Pmax, 
-                 demand,
+                 Pmin: List[float], Pmax: List[float], 
+                 demand: float,
                  cost: List[float], 
-                 segments = None,
+                 segments: int = None,
                  exercise: str = "3"
                 ):
 
@@ -31,13 +31,13 @@ class EPEC:
         self.exercise = exercise
 
         # ----- Problem data -----
-        self.Pmin = Pmin
-        self.Pmax = Pmax
+        self.Pmin = [float(val) for val in Pmin]
+        self.Pmax = [float(val) for val in Pmax]
 
         # Define number of generators
         self.num_generators = len(Pmin) # Number of generators defined by length of Pmin/Pmax/cost
 
-        self.demand = demand # System demand
+        self.demand = float(demand) # System demand
 
         self.segments = segments # number of segments in the cost discretization
 
@@ -53,7 +53,6 @@ class EPEC:
         assert len(Pmax) == self.num_generators, "Pmax length must match number of generators"
         assert len(cost) == self.num_generators, "Cost length must match number of generators"
 
-        
         # Results storage
         self.results = {}
     
@@ -88,19 +87,31 @@ class EPEC:
         all_combinations = list(itertools.product(*self.cost))
 
         print(f"Total combinations to evaluate: {len(all_combinations)}")
+        
+        #The total number of runs is the length of all_combinations
         total_runs = len(all_combinations)
+
+        # Initialize counter for converged runs
         converged_runs = 0
 
+        # For all the cost vector combinations, run the best response algorithm
         for run_id, cost_vector in enumerate(all_combinations):
+
+            # Get the cost vector from the combination tuple
             cost_vector = np.array(cost_vector)
+
+            # Run the best response algorithm for this cost vector and run_id
             self.run_best_response(cost_vector, run_id)
 
+            # If the run converged, increment the counter
             if self.results[run_id]["converged"]:
                 converged_runs += 1
 
+        # Calculate share of converged runs
         share_converged = 100 * converged_runs / total_runs if total_runs > 0 else 0.0
         print(f"Converged in {converged_runs}/{total_runs} runs ({share_converged:.1f}%)")
     
+        # Find the worst PoA among all runs
         worst_id, worst_poa = max(
             ((id, res['PoA']) for id, res in self.results.items()),
             key=lambda x: x[1]
@@ -109,11 +120,11 @@ class EPEC:
         print(f"Worst PoA: {worst_poa:.2f} (from run id {worst_id})")
         return share_converged, worst_poa
 
-    def run_best_response(self, cost_vector, run_id) -> None:
+    def run_best_response(self, cost_vector: List[float], run_id: int) -> None:
         """
-        The best response algorithm implementation as presented in the assignment and class
+        The best response algorithm implementation as presented in the assignment and class. This algorithm also stores the internal histories for analysis
 
-        Saves the results in the results dictionary.
+        Saves the results in the results dictionary
 
         Parameters
         -------
@@ -123,63 +134,109 @@ class EPEC:
             Identifier for the current run/experiment.
         """
 
-        profit_history, alpha_history, dispatch_history = [], [], []
-        convergence_check_1, convergence_check_2, clearing_price_history = [], [], []
-        internal_profit_history = []
+        # Initialize histories from global perspective
+        profit_history, alpha_history, dispatch_history, clearing_price_history = [], [], [], []
+
+        # Initialize the internal histories from each player's perspective
+        internal_profit_history, internal_bid_history, internal_dispatch_history, internal_clearing_price_history = [], [], [], []
+        # NOTE the internal_profit_history is the only list needed for the algorithm to work - The others are stored for analysis purposes
+
+        # Initialize player order history
         player_order_history = []
 
+        # Initialize convergence checks       
+        convergence_check_1, convergence_check_2 = [], []
+        
+        # Calculate the economic dispatch for the true cost vector
         dispatch_ED, clearing_price_ED = self.economic_dispatch(cost_vector)
+
+        # Initialize the iteration counter, bid vector and convergence flag
         iter = 0
         bid_vector = cost_vector.copy()
         converged = False
         
+        # Main loop for the best response algorithm
         while iter < self.max_iter:
+
+            # Initialize global histories for this iteration
             profit_history.append([None] * self.num_generators)
-            internal_profit_history.append([None] * self.num_generators)
             alpha_history.append([None] * self.num_generators)
             dispatch_history.append([None] * self.num_generators)
+            # NOTE the clearing price is only one value and is appended when calculated - does not need to be initialized here
+
+            # Initialize internal histories for this iteration 
+            internal_profit_history.append([None] * self.num_generators)
+            internal_clearing_price_history.append([None] * self.num_generators)
+            # NOTE the internal_bid_history and internal_dispatch_history are appended after each player's action - does not need to be initialized here
+ 
+            # Initialize convergence checks for this iteration
             convergence_check_1.append([False] * self.num_generators)
             convergence_check_2.append([False] * self.num_generators)
 
+            # Create player update list
             players = list(range(self.num_generators))
 
+            # If the heuristic is enabled, randomize the update order each iteration
             if self.heuristic:
                 random.seed(iter + run_id)
-                random.shuffle(players)                   # randomize update order each iteration
+                random.shuffle(players)
             
+            # Store the player order for this iteration
             player_order_history.append(players.copy())
 
+            # Each player updates their bid in sequence
             for p in players:
                 self._build_model(p, bid_vector, cost_vector)
                 self.solve()
+
+                # Robustly handle both single generator players and multi-generator players
                 for g in (p if isinstance(p, (list, tuple, set)) else [p]):
                     
+                    # Retrieve the bid from the MPEC
                     alpha_new = self.model.alpha[g].value
                     # Add heuristic: enforce rational bidding floor and cap
                     if self.heuristic:
                         alpha_new = max(alpha_new, cost_vector[g])   
 
+                    # Update the bid vector and store the new bid
                     bid_vector[g] = alpha_new
                     alpha_history[iter][g] = alpha_new
 
+                # Store internal histories after player's action
                 internal_profit_history[iter][p] = -value(self.model.objective)
-                dispatch_history[iter][g] = self.model.P_G[g].value
-            
+                internal_dispatch_history.append([self.model.P_G[i].value for i in range(self.num_generators)])
+                internal_clearing_price_history[iter][p] = self.model.lambda_dual.value
+                internal_bid_history.append(bid_vector.copy())
+
+            # Store clearing price for this iteration after all players have acted
+            clearing_price_history.append(internal_clearing_price_history[iter][p])
+
+            # After the first 5 iterations, check for convergence
             if iter > 4:
                 # First convergence check - after each player has acted
                 for p in players:
+                    # Get the previous and current profit for player p
                     prev_profit = internal_profit_history[iter - 1][p]
                     curr_profit = internal_profit_history[iter][p]   
 
-                    if (curr_profit >= prev_profit * (1 - self.convergence_tol) and curr_profit <= prev_profit * (1 + self.convergence_tol)): 
+                    # Check if the profit has converged within the tolerance
+                    if (curr_profit + self.convergence_tol  >= prev_profit * (1 - self.convergence_tol) and 
+                        curr_profit <= prev_profit * (1 + self.convergence_tol) + self.convergence_tol): 
 
+                        # If True, mark player p as converged for this check
                         convergence_check_1[iter][p] = True
 
+                # If all players passed the first convergence check the second check is performed
                 if all(convergence_check_1[iter]):                      
-                    for p in players:
-                        dispatch_round, clearing_price_round = self.economic_dispatch(bid_vector)
-                        dispatch_history[iter] = dispatch_round
+                    # Perform economic dispatch based on current bids
+                    dispatch_round, clearing_price_round = self.economic_dispatch(bid_vector)
 
+                    # Store the dispatch results for this iteration
+                    dispatch_history[iter] = dispatch_round
+
+                    # For each player, calculate and store profit after market clearing
+                    for p in players:
+                        # Calculate profit for player p based on market clearing - This is done in cases with both single and multi-generator players
                         if isinstance(p, (list, tuple, set)):
                             profit_market_clearing = sum(
                                 clearing_price_round * dispatch_round[g]
@@ -191,6 +248,8 @@ class EPEC:
                                 clearing_price_round * dispatch_round[p]
                                 - cost_vector[p] * dispatch_round[p]
                             )
+                        
+                        # Store the profit after market clearing
                         profit_history[iter][p] = profit_market_clearing
 
                         # Debugging prints
@@ -202,111 +261,173 @@ class EPEC:
                         if (internal_profit_history[iter][p] + self.convergence_tol >= profit_history[iter][p] * (1 - self.convergence_tol) and 
                             internal_profit_history[iter][p] <= profit_history[iter][p] * (1 + self.convergence_tol) + self.convergence_tol):
                             convergence_check_2[iter][p] = True
-                        else:
-                            convergence_check_2[iter][p] = False
-                    
-                    clearing_price_history.append(clearing_price_round)
 
+                    # If all players passed the second convergence check, the algorithm has converged
                     if all (convergence_check_2[iter]):
                         print(f"Run id: {run_id} - Converged after {iter} full rounds.")
                         converged = True
                         break
+                
+                # If the algorithm has not converged pass to the next iteration
                 else:
+                    # If iter is the last iteration, perform final economic dispatch and store results
                     if iter == self.max_iter - 1:
                         dispatch_round, clearing_price_round = self.economic_dispatch(bid_vector)
                         dispatch_history[iter] = dispatch_round
-                        clearing_price_history.append(clearing_price_round)
                         for j in range(self.num_generators):
                             profit_history[iter][j] = (
                                 clearing_price_round * dispatch_round[j]
                                 - cost_vector[j] * dispatch_round[j]
                             )
+            # Update iteration counter
             iter += 1
+            
+            # If maximum iterations reached without convergence, store last dispatch
             if iter == self.max_iter:
                 print(f"Run id: {run_id} - Reached maximum iterations {self.max_iter} without convergence.")
                 dispatch_history.append(dispatch_history[iter - 1])
-                # print(players)                
 
+        # Calculate Price of Anarchy (PoA)
         PoA = sum(cost_vector[g] * dispatch_history[iter][g] for g in range(self.num_generators)) / (sum(cost_vector[g] * dispatch_ED[g] for g in range(self.num_generators)))
+
+        # Calculate alternative PoA definition based on bids
         PoA_ish = sum(bid_vector[g] * dispatch_history[iter][g] for g in range(self.num_generators)) / (sum(cost_vector[g] * dispatch_ED[g] for g in range(self.num_generators)))
 
         final_bid = bid_vector.copy()
         final_dispatch = dispatch_round
 
+        # Store results in the results dictionary
         self.results[run_id] = {
                         "cost_vector": cost_vector,
-                        "profit_history": internal_profit_history,
+                        "internal_profit_history": internal_profit_history,
+                        "internal_bid_history": internal_bid_history,
+                        "internal_dispatch_history": internal_dispatch_history,
+                        "internal_clearing_price_history": internal_clearing_price_history,
+                        "player_order_history": player_order_history,
+                        "profit_history": profit_history,
                         "alpha_history": alpha_history,
                         "dispatch_history": dispatch_history,
+                        "clearing_price_history": clearing_price_history,
                         "iterations": iter,
-                        "PoA": PoA,
-                        "PoA_ish": PoA_ish,
-                        "player_order_history": player_order_history,
                         "final_dispatch": final_dispatch,
                         "final_bid": final_bid,
-                        "clearing_price": clearing_price_history[-1],
-                        "clearing_price_history": clearing_price_history,
+                        "final_clearing_price": clearing_price_history[-1],
                         "dispatch_ED": dispatch_ED,
                         "clearing_price_ED": clearing_price_ED,
+                        "PoA": PoA,
+                        "PoA_ish": PoA_ish,
                         "converged": converged,
                     }
 
-    def iterate_ownership_combinations(self, ownership_size = 2):
+    def iterate_ownership_combinations(self, ownership_size: int = 2) -> tuple[float, float]:
+        """
+        Function used for exercise 5
+        - Iterate over all ownership combinations where one player "ownership_size" generators.
+        The Best Response algorithm is then triggered to compute the Nash Equilibrium.
+        Saves the results for each run_id ie. setup used in the results dictionary.
+        
+        Parameters
+        -------
+        ownership_size : int
+            Number of generators owned by the main actor.
+        
+        Return
+        -------
+        share_converged : float
+            Percentage of runs that converged.
+        worst_poa : float
+            Worst Price of Anarchy (PoA) observed among all runs.
+
+        """
+
         # Ownership combinations
         all_combinations = list(itertools.combinations(range(self.num_generators), ownership_size))
 
+        # The different ownership combinations to evaluate
         print(all_combinations)
         print(f"Total combinations to evaluate: {len(all_combinations)}")
+
+        # Initialize counters for total runs and converged runs
         total_runs = len(all_combinations)
         converged_runs = 0
 
+        # For all the ownership combinations, run the best response algorithm
         for run_id, owner_indexes in enumerate(all_combinations):
+            print(owner_indexes)
             self.run_best_response_ownership(owner_indexes, run_id)
             if self.results[run_id]["converged"]:
                 converged_runs += 1
 
+        # Calculate share of converged runs
         share_converged = 100 * converged_runs / total_runs if total_runs > 0 else 0.0
         print(f"Converged in {converged_runs}/{total_runs} runs ({share_converged:.1f}%)")
     
+        # Find the worst PoA among all runs
         worst_id, worst_poa = max(
             ((id, res['PoA']) for id, res in self.results.items()),
             key=lambda x: x[1]
         )
         
-        #convert results to csv
-        os.makedirs("outputs/ownership_results", exist_ok=True)
-        file_path = os.path.join("outputs/ownership_results", f"results_{self.demand}_{self.num_generators}_{self.alpha_min}.csv")
-        with open(file_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["Key", "Value"])
-            for key, value in self.results.items():
-                writer.writerow([key, value])
+        # #convert results to csv
+        # os.makedirs("outputs/ownership_results", exist_ok=True)
+        # file_path = os.path.join("outputs/ownership_results", f"results_{self.demand}_{self.num_generators}_{self.alpha_min}.csv")
+        # with open(file_path, "w", newline="") as f:
+        #     writer = csv.writer(f)
+        #     writer.writerow(["Key", "Value"])
+        #     for key, value in self.results.items():
+        #         writer.writerow([key, value])
 
         print(f"Worst PoA: {worst_poa:.2f} (from run id {worst_id})")
         return share_converged, worst_poa
 
-    def run_best_response_ownership(self, owner_indexes, run_id):
-        actor_profit_history, alpha_history, dispatch_history = [], [], []
-        convergence_check_1, convergence_check_2, clearing_price_history = [], [], []
+    def run_best_response_ownership(self, owner_indexes: tuple[int], run_id: int) -> None:
+        """
+        The best response algorithm implementation for exercise 5 - Ownership of multiple generators. 
+
+        NOTE: This algorithm does not store the internal histories for analysis, like the run_best_response
+        
+        Saves the results in the results dictionary.
+
+        Parameters
+        -------
+        owner_indexes : tuple[int]
+            List of generator indexes owned by the main actor.
+        run_id : int
+            Identifier for the current run/experiment.
+        """
+
+        # Initialize histories from global perspective
+        actor_profit_history, alpha_history, dispatch_history, clearing_price_history = [], [], [], []
+
+        # Initialize the internal_profit_history from each actor's perspective
         internal_actor_profit_history = []
 
-        cost_vector = self.true_cost.copy()
+        # Initialize convergence checks
+        convergence_check_1, convergence_check_2,  = [], []
 
+        # Calculate the economic dispatch for the true cost vector
+        cost_vector = self.true_cost.copy()
         dispatch_ED, clearing_price_ED = self.economic_dispatch(cost_vector)
+
+        # Initialize the iteration counter, bid vector and convergence flag
         iter = 0
         bid_vector = cost_vector.copy()
         converged = False
         
-        
+        # Main loop for the best response algorithm
         while iter < self.max_iter:
+            # Initialize global histories for this iteration
             alpha_history.append([None] * self.num_generators)
             dispatch_history.append([None] * self.num_generators)
 
             # Track profit for each actor: owner + individual competitors
             num_actors = 1 + len([i for i in range(self.num_generators) if i not in owner_indexes])
+
+            # Initialize internal histories for this iteration
             internal_actor_profit_history.append([None] * num_actors)
             actor_profit_history.append([None] * num_actors)
 
+            # Initialize convergence checks for this iteration
             convergence_check_1.append([False] * num_actors)
             convergence_check_2.append([False] * num_actors)
 
@@ -316,7 +437,7 @@ class EPEC:
             # List of actors. First one is the owner coalition
             actors = [tuple(owner_indexes)] + competitors
 
-            # Map actors → list index
+            # Map actors -> list index
             actor_to_index = {actor: a_idx for a_idx, actor in enumerate(actors)}
 
             # Create player update list
@@ -325,8 +446,9 @@ class EPEC:
             # If the heuristic is enabled, randomize the update order each iteration
             if self.heuristic:
                 random.seed(iter + run_id)
-                random.shuffle(players)                    # randomize update order each iteration
+                random.shuffle(players)
 
+            # Each player updates their bid in sequence
             for p in players:
                 self._build_model(p, bid_vector, cost_vector)
                 self.solve()
@@ -337,27 +459,35 @@ class EPEC:
                     if self.heuristic:
                         alpha_new = max(alpha_new, cost_vector[g])   # rational floor
     
+                    # Update the bid vector and store the new bid
                     bid_vector[g] = alpha_new
                     alpha_history[iter][g] = alpha_new
 
+                # Store internal histories after player's action
                 internal_actor_profit_history[iter][actor_to_index[p]] = -value(self.model.objective)
                 dispatch_history[iter][g] = self.model.P_G[g].value
 
+            # After the first 5 iterations, check for convergence
             if iter > 4:
                 # First convergence check - after each player has acted
                 for p in players:
                     prev_profit = internal_actor_profit_history[iter - 1][actor_to_index[p]]
                     curr_profit = internal_actor_profit_history[iter][actor_to_index[p]]
 
+                    # Check if the profit has converged within the tolerance
                     if (curr_profit >= prev_profit * (1 - self.convergence_tol) and curr_profit <= prev_profit * (1 + self.convergence_tol)): 
 
+                        # If True, mark player p as converged for this check
                         convergence_check_1[iter][actor_to_index[p]] = True
                 
+                # If all players passed the first convergence check the second check is performed
                 if all(convergence_check_1[iter]):
-                    for p in players:
-                        dispatch_round, clearing_price_round = self.economic_dispatch(bid_vector)
-                        dispatch_history[iter] = dispatch_round
+                    # Perform economic dispatch based on current bids
+                    dispatch_round, clearing_price_round = self.economic_dispatch(bid_vector)
+                    dispatch_history[iter] = dispatch_round
 
+                    # For each player, calculate and store profit after market clearing
+                    for p in players:
                         # Calculate profit for the actor
                         if isinstance(p, (list, tuple, set)):
                             profit_market_clearing = sum(
@@ -370,17 +500,19 @@ class EPEC:
                                 clearing_price_round * dispatch_round[p]
                                 - cost_vector[p] * dispatch_round[p]
                             )
+                        
+                        # Store the profit after market clearing
                         actor_profit_history[iter][actor_to_index[p]] = profit_market_clearing
 
                         # Second convergence check - after market clearing
                         if (internal_actor_profit_history[iter][actor_to_index[p]] + self.convergence_tol >= actor_profit_history[iter][actor_to_index[p]] * (1 - self.convergence_tol) and 
                             internal_actor_profit_history[iter][actor_to_index[p]] <= actor_profit_history[iter][actor_to_index[p]] * (1 + self.convergence_tol) + self.convergence_tol):
                             convergence_check_2[iter][actor_to_index[p]] = True
-                        else:
-                            convergence_check_2[iter][actor_to_index[p]] = False
 
+                    # Store clearing price for this iteration after all players have acted
                     clearing_price_history.append(clearing_price_round)
 
+                    # If all players passed the second convergence check, the algorithm has converged
                     if all(convergence_check_2[iter]):
                         print(f"Run id: {run_id} - Converged after {iter} full rounds.")
                         converged = True
@@ -388,7 +520,9 @@ class EPEC:
                         print(f"  Competitor profits: {[actor_profit_history[iter][i] for i in range(1, num_actors)]}")
                         print(f"  Owner share of total profit: {100 * actor_profit_history[iter][actor_to_index[tuple(owner_indexes)]] / sum(actor_profit_history[iter]):.2f}%")
                         break
+                # If the algorithm has not converged pass to the next iteration
                 else:
+                    # If iter is the last iteration, perform final economic dispatch and store results
                     if iter == self.max_iter - 1:
                         dispatch_round, clearing_price_round = self.economic_dispatch(bid_vector)
                         dispatch_history[iter] = dispatch_round
@@ -398,20 +532,23 @@ class EPEC:
                                 clearing_price_round * dispatch_round[j]
                                 - cost_vector[j] * dispatch_round[j]
                             )
+            # Update iteration counter
             iter += 1
+            # If maximum iterations reached without convergence, store last dispatch
             if iter == self.max_iter:
                 print(f"Run id: {run_id} - Reached maximum iterations {self.max_iter} without convergence.")
                 dispatch_history.append(dispatch_history[iter - 1])
 
+        # Calculate Price of Anarchy (PoA)
         PoA = sum(cost_vector[g] * dispatch_history[iter][g] for g in range(self.num_generators)) / (sum(cost_vector[g] * dispatch_ED[g] for g in range(self.num_generators)))
+        # Calculate alternative PoA definition based on bids
         PoA_ish = sum(bid_vector[g] * dispatch_history[iter][g] for g in range(self.num_generators)) / (sum(cost_vector[g] * dispatch_ED[g] for g in range(self.num_generators)))
 
+        # Store final bids and dispatch
         final_bid = bid_vector.copy()
         final_dispatch = dispatch_round
 
-        final_bid = bid_vector.copy()
-        final_dispatch = dispatch_round
-
+        # Store results in the results dictionary
         self.results[run_id] = {
                         "cost_vector": cost_vector,
                         "profit_history": internal_actor_profit_history,
@@ -422,109 +559,14 @@ class EPEC:
                         "PoA_ish": PoA_ish,
                         "final_dispatch": final_dispatch,
                         "final_bid": final_bid,
-                        "clearing_price": clearing_price_history[-1],
+                        "final_clearing_price": clearing_price_history[-1],
                         "clearing_price_history": clearing_price_history,
                         "dispatch_ED": dispatch_ED,
                         "clearing_price_ED": clearing_price_ED,
                         "converged": converged,
                     }
 
-
-        #     # --- Market clearing (global consistency) ---
-        #     dispatch_round, clearing_price_round, _ = self.economic_dispatch(bid_vector)
-        #     dispatch_history[iter] = dispatch_round
-        #     clearing_price_history.append(clearing_price_round)
-
-        #     for j in range(self.num_generators):
-        #         profit_history[iter][j] = (
-        #             clearing_price_round * dispatch_round[j]
-        #             - cost_vector[j] * dispatch_round[j]
-        #         )
-
-        #     # --- Calculate actor-level profits ---
-        #     # Actor 0: the owner (combines all owned generators)
-        #     owner_profit = sum(profit_history[iter][g] for g in owner_indexes)
-        #     actor_profit_history[iter][0] = owner_profit
-
-        #     # Actors 1+: individual competitors
-        #     actor_idx = 1
-        #     for j in range(self.num_generators):
-        #         if j not in owner_indexes:
-        #             actor_profit_history[iter][actor_idx] = profit_history[iter][j]
-        #             actor_idx += 1
-
-        #     # --- Convergence check ---
-        #     if iter > 5:
-        #         num_actors = len(actor_profit_history[iter])
-        #         actor_converged = [False] * num_actors
-                
-        #         for actor_idx in range(num_actors):
-        #             prev_profit = actor_profit_history[iter - 1][actor_idx]
-        #             curr_profit = actor_profit_history[iter][actor_idx]
-                    
-        #             # Check profit convergence for this actor
-        #             profit_converged = (
-        #                 curr_profit >= prev_profit * (1 - self.convergence_tol) and
-        #                 curr_profit <= prev_profit * (1 + self.convergence_tol)
-        #             )
-                    
-        #             # Check bid convergence for this actor's generators
-        #             if actor_idx == 0:
-        #                 # Owner: check all owned generators' bids
-        #                 bids_converged = all(
-        #                     alpha_history[iter][g] >= alpha_history[iter-1][g] * (1 - self.convergence_tol) and
-        #                     alpha_history[iter][g] <= alpha_history[iter-1][g] * (1 + self.convergence_tol)
-        #                     for g in owner_indexes
-        #                 )
-        #             else:
-        #                 # Competitor: find which generator this actor owns
-        #                 competitors = [i for i in range(self.num_generators) if i not in owner_indexes]
-        #                 gen_idx = competitors[actor_idx - 1]
-        #                 bids_converged = (
-        #                     alpha_history[iter][gen_idx] >= alpha_history[iter-1][gen_idx] * (1 - self.convergence_tol) and
-        #                     alpha_history[iter][gen_idx] <= alpha_history[iter-1][gen_idx] * (1 + self.convergence_tol)
-        #                 )
-                    
-        #             actor_converged[actor_idx] = profit_converged and bids_converged
-                
-        #         # Check if all actors have converged
-        #         if all(actor_converged):
-        #             print(f"Run id: {run_id} - Converged after {iter} full rounds.")
-        #             print(f"  Owner profit: ${actor_profit_history[iter][0]:.2f}")
-        #             print(f"  Competitor profits: {[actor_profit_history[iter][i] for i in range(1, num_actors)]}")
-        #             print(f"  Owner share of total profit: {100 * actor_profit_history[iter][0] / sum(actor_profit_history[iter]):.2f}%")
-        #             converged = True
-        #             break
-        #     if iter == self.max_iter:
-        #         print(f"Run id: {run_id} - Reached maximum iterations {self.max_iter} without convergence.")
-
-        #     iter += 1
-
-        # # --- Final consistent results ---
-        # PoA = sum(cost_vector * dispatch_round) / sum(cost_vector * dispatch_ED)
-        # final_bid = bid_vector.copy()
-        # final_dispatch = dispatch_round
-
-        # not_converged = not converged
-
-        # return (
-        #     profit_history,
-        #     alpha_history,
-        #     dispatch_history,
-        #     iter,
-        #     PoA,
-        #     dispatch_ED,
-        #     clearing_price_ED,
-        #     final_dispatch,
-        #     final_bid,
-        #     clearing_price_round,
-        #     clearing_price_history,
-        #     converged,
-        #     not_converged,
-        #     actor_profit_history
-        # )
-
-    def _build_model(self, index_strategic, bid_vector, cost_vector) -> None:
+    def _build_model(self, index_strategic: int | tuple[int], bid_vector: List[float], cost_vector: List[float]) -> None:
         """
         Function to build the MPEC model for the strategic player/actor. 
         This function calls sub-functions to build variables, objective and constraints, and set the index of which participant is strategic.
@@ -532,7 +574,7 @@ class EPEC:
 
         Parameters
         ----------
-        index_strategic : int or list/tuple
+        index_strategic : int or tuple[int]
             Index or indexes of the strategic generator(s).
         bid_vector : List[float]
             Array of bid values for each generator - not using the strategic players previous bid.
@@ -555,7 +597,7 @@ class EPEC:
         self._build_objective(bid_vector, cost_vector)
         self._build_constraints(bid_vector)
 
-    def _build_variables(self):
+    def _build_variables(self) -> None:
         """
         Function to build the Pyomo variables for the MPEC model. 
         """
@@ -568,7 +610,7 @@ class EPEC:
         self.model.z_max = Var(self.model.n_gen, domain=Binary)
         self.model.tau = Var(self.model.strategic_index, self.model.n_gen - self.model.strategic_index, domain=Binary)
 
-    def _build_objective(self, bid_vector, cost_vector):
+    def _build_objective(self, bid_vector: List[float], cost_vector: List[float]) -> None:
         """
         Function to build the Pyomo objective for the MPEC model. 
 
@@ -614,14 +656,7 @@ class EPEC:
             sense = minimize
         )
 
-        # self.model.term_lambda = term_lambda / self.demand
-        # self.model.term_duals = term_duals
-        # self.model.term_non_strat = term_non_strat
-        # self.model.term_strat_1 = term_duals_strat_1
-        # self.model.term_strat_2 = term_duals_strat_2
-        # self.model.term_costs_strat = term_costs_strat
-
-    def _build_constraints(self, bid_vector):
+    def _build_constraints(self, bid_vector: List[float]) -> None:
         """
         Function to build the Pyomo constraints for the MPEC model. STILL NEED COMMENTS ON EACH OF THE CONSTRAINTS
         """
@@ -707,7 +742,7 @@ class EPEC:
             return m.mu_max[i] <= M * (1 - m.z_max[i])
         self.model.max_complementarity_2 = Constraint(self.model.n_gen, rule=max_complementarity_2)       
 
-    def solve(self, solver_name="gurobi"):
+    def solve(self, solver_name: str = "gurobi") -> None:
         """
         Solve the optimization model.
 
@@ -725,21 +760,16 @@ class EPEC:
 
         # Check solver status
         if not (results.solver.status == 'ok') and not (results.solver.termination_condition == 'optimal'):
-            # print("Optimal solution found for strategic producer problem.")
-        # else:
             print("Solver status:", results.solver.status)
             print("Termination condition:", results.solver.termination_condition)
 
-        # Display results
-        # self._display_results()
-
-    def MPEC(self, index_strategic, cost_vector) -> tuple[List[float], float]:
+    def MPEC(self, index_strategic: int | tuple[int], cost_vector: List[float]) -> tuple[List[float], float, dict]:
         """
         Solve the MPEC problem for the strategic player/actor.
 
         Parameters
         ----------
-        index_strategic : int or list/tuple
+        index_strategic : int or tuple[int]
             Index or indexes of the strategic generator(s).
         cost_vector : List[float]
             Array of cost values for each generator. (Only used in the objective to calculate the profit of the strategic player).
@@ -750,6 +780,8 @@ class EPEC:
             Optimal dispatch for each generator.
         clearing_price : float
             Market clearing price.
+        alpha_values : Dict[float]
+            Dictionary of alpha values for each strategic generator.
         """
         self._build_model(index_strategic = index_strategic, bid_vector = cost_vector, cost_vector = cost_vector)
         self.solve()
@@ -758,7 +790,7 @@ class EPEC:
         alpha_values = {i: self.model.alpha[i].value for i in self.model.strategic_index}
         return dispatch, clearing_price, alpha_values
 
-    def economic_dispatch(self, cost_vector) -> tuple[List[float], float]:
+    def economic_dispatch(self, cost_vector: List[float]) -> tuple[List[float], float]:
         """
         Solve the economic dispatch problem with the bids placed.
 
@@ -800,7 +832,17 @@ class EPEC:
             print("Solver status:", results.solver.status)
             print("Termination condition:", results.solver.termination_condition)
     
-    def plot_merit_order_curve(self, run_id):
+    def plot_merit_order_curve(self, run_id: int) -> None:
+        """
+        Plot the merit order curve for both the economic dispatch and the strategic producer case for a given run_id.
+        Saves the plot as a PNG file in the outputs/{exercise}/merit_order_curves/ directory.
+
+        Parameters
+        ----------
+        run_id : int
+            Identifier for the run/experiment to plot.
+        """
+
         if "owner_indexes" not in self.results[run_id]:
             owner_indexes = set()
         else:
@@ -811,7 +853,7 @@ class EPEC:
         dispatch_ED = self.results[run_id]['dispatch_ED']
         clearing_price_ED = self.results[run_id]['clearing_price_ED']
         dispatch_SP = self.results[run_id]['final_dispatch']
-        clearing_price_SP = self.results[run_id]['clearing_price']
+        clearing_price_SP = self.results[run_id]['final_clearing_price']
 
         cost_array = np.array(cost_vector)
         pmax_array = np.array(self.Pmax)
@@ -936,7 +978,17 @@ class EPEC:
         # plt.show()
         plt.close()
 
-    def plot_alpha_over_iterations(self, run_id):
+    def plot_alpha_over_iterations(self, run_id: int) -> None:
+        """
+        Plot the evolution of alpha (bids) over iterations for a given run_id.
+        Saves the plot as a PNG file in the outputs/{exercise}/alpha/ directory.
+
+        Parameters
+        ----------
+        run_id : int
+            Identifier for the run/experiment to plot.
+        """
+        
         alpha_history = self.results[run_id]['alpha_history']
 
         cost_vector = self.results[run_id]['cost_vector']
@@ -955,7 +1007,17 @@ class EPEC:
         plt.savefig(f'Assignment_scripts/figures/{self.exercise}/alpha/alpha_evolution_run_{run_id}.png', dpi=300)
         plt.close()
 
-    def plot_clearing_price_over_iterations(self, run_id):
+    def plot_clearing_price_over_iterations(self, run_id: int) -> None:
+        """
+        Plot the evolution of clearing price over iterations for a given run_id.
+        Saves the plot as a PNG file in the outputs/{exercise}/clearing_price/ directory.
+        
+        Parameters
+        ----------
+        run_id : int
+            Identifier for the run/experiment to plot.
+        """
+
         clearing_price_history = self.results[run_id]['clearing_price_history']
 
         clearing_price_history = np.array(clearing_price_history)
@@ -971,7 +1033,17 @@ class EPEC:
         plt.savefig(f'Assignment_scripts/figures/{self.exercise}/clearing_price/clearing_price_evolution_run_{run_id}.png', dpi=300)
         plt.close()
 
-    def plot_dispatch_over_iterations(self, run_id):
+    def plot_dispatch_over_iterations(self, run_id: int) -> None:
+        """
+        Plot the evolution of dispatch over iterations for a given run_id.
+        Saves the plot as a PNG file in the outputs/{exercise}/dispatch/ directory.
+        
+        Parameters
+        ----------
+        run_id : int
+            Identifier for the run/experiment to plot.
+        """
+
         dispatch_history = self.results[run_id]['dispatch_history']
         economic_dispatch = self.results[run_id]['dispatch_ED']
 
@@ -997,10 +1069,15 @@ class EPEC:
         plt.savefig(f'Assignment_scripts/figures/{self.exercise}/dispatch/dispatch_evolution_run_{run_id}.png', dpi=300)
         plt.close()
 
-    def plot_dispatch_comparison(self, run_id):
+    def plot_dispatch_comparison(self, run_id: int) -> None:
         """
-        Creates a bar plot comparing the Economic Dispatch (ED)
-        with the Strategic Equilibrium Dispatch (SP) for one run.
+        Creates a bar plot comparing the Economic Dispatch (ED) with the Strategic Equilibrium Dispatch (SP) for one run.
+        Saves the plot as a PNG file in the outputs/{exercise}/dispatch/ directory.
+        
+        Parameters
+        ----------
+        run_id : int
+            Identifier for the run/experiment to plot.
         """
 
         result = self.results[run_id]
@@ -1031,7 +1108,12 @@ class EPEC:
         plt.savefig(f'Assignment_scripts/figures/{self.exercise}/dispatch/dispatch_comparison_run_{run_id}.png', dpi=300)
         plt.close()
 
-    def plot_PoA(self):
+    def plot_PoA(self) -> None:
+        """
+        Plot the distributions of Price of Anarchy (PoA) and Improved PoA (PoA_ish) across all runs.
+        Saves the plot as a PNG file in the outputs/{exercise}/PoA/ directory.
+        """
+
         # Extract values
         PoA_values_converged = [
             self.results[run_id]['PoA']
@@ -1095,8 +1177,18 @@ class EPEC:
         plt.savefig(f'Assignment_scripts/figures/{self.exercise}/PoA/PoA_distributions.png', dpi=300)
         plt.close()
 
-    def plot_profits(self, run_id):
-        profit_history = self.results[run_id]['profit_history']
+    def plot_profits(self, run_id: int) -> None:
+        """
+        Plot generator-level profits over iterations for a given run_id.
+        Saves the plot as a PNG file in the outputs/{exercise}/profits/ directory.
+        
+        Parameters
+        ----------
+        run_id : int
+            Identifier for the run/experiment to plot.
+        """
+
+        profit_history = self.results[run_id]['internal_profit_history']
 
         # Check if this is an ownership scenario
         if "owner_indexes" in self.results[run_id]:
@@ -1135,10 +1227,16 @@ class EPEC:
         plt.close()
         # plt.show()
 
-    def plot_actor_profits(self, run_id):
+    def plot_actor_profits(self, run_id: int) -> None:
         """
         Plot actor-level profits over iterations for ownership scenarios.
         Shows the owner's combined profit and each competitor's individual profit.
+        Saves the plot as a PNG file in the outputs/{exercise}/actor_profits/ directory.
+
+        Parameters
+        ----------
+        run_id : int
+            Identifier for the run/experiment to plot.
         """
         if "owner_indexes" not in self.results[run_id]:
             print(f"Run {run_id} is not an ownership scenario. Use plot_profits() instead.")
@@ -1226,7 +1324,18 @@ class EPEC:
         plt.savefig(f'Assignment_scripts/figures/{self.exercise}/actor_profits/actor_profits_run_{run_id}.png', dpi=300)
         plt.close()
 
-    def plot_merit_order_from_MPEC(self, strategic_index, cost_vector):
+    def plot_merit_order_from_MPEC(self, strategic_index: int, cost_vector: List[float]) -> None:
+        """
+        Plot the merit order curves from both Economic Dispatch (ED) and the Strategic Producer (SP) MPEC solution.
+        Saves the plot as a PNG file in the outputs/{exercise}/merit_order_MPEC/ directory.
+
+        Parameters
+        ----------
+        strategic_index : int
+            Index of the strategic generator.
+        cost_vector : List[float]
+            Array of cost values for each generator.
+        """
 
         # --- ED ---
         _, clearing_price_ED = self.economic_dispatch(cost_vector)
@@ -1313,65 +1422,59 @@ class EPEC:
         plt.savefig(f'Assignment_scripts/figures/{self.exercise}/merit_order_MPEC/merit_order_MPEC_demand_{self.demand}.png', dpi=300)
         plt.close()
 
-    def build_iteration_table(self, run_id):
-        """Build iteration-round table exactly like the assignment screenshot."""
+    def build_iteration_table(self, run_id) -> pd.DataFrame:
+        """
+        Build a DataFrame summarizing each iteration's bids, dispatches,
+        market prices, and strategic profits for all generators for a given run_id.
+        """
 
         result = self.results[run_id]
         num_g = self.num_generators
 
-        alpha_hist = result["alpha_history"]
-        dispatch_hist = result["dispatch_history"]
-        profit_hist = result["profit_history"]
-        clearing_hist = result["clearing_price_history"]
-        player_order_hist = result["player_order_history"]  
+        internal_bids = result["internal_bid_history"]
+        internal_dispatch = result["internal_dispatch_history"]
+        internal_profits = result["internal_profit_history"]
+        internal_prices = result["internal_clearing_price_history"]
+        player_order_hist = result["player_order_history"]
 
         rows = []
 
-        for iter_idx, (alphas, dispatches) in enumerate(zip(alpha_hist, dispatch_hist)):
+        round_counter = 0   # counts rounds globally across iterations
 
-            # skip empty iterations (may appear after convergence)
-            if alphas is None or dispatches is None:
-                continue
+        for iter_idx, update_order in enumerate(player_order_hist):
 
-            internal_profits = profit_hist[iter_idx]
-
-            # clearing price for iteration
-            if iter_idx < len(clearing_hist):
-                market_price = clearing_hist[iter_idx]
-            else:
-                market_price = clearing_hist[-1]
-
-            # players updated in THIS iteration (actual order)
-            update_order = player_order_hist[iter_idx]
-
-            # one row per round (player update)
             for round_idx, p in enumerate(update_order):
 
+                # Round-level bid vector
+                bids = internal_bids[round_counter]
+                dispatches = internal_dispatch[round_counter]
+
+                # Clearing price for this round = price the model produced when p acted
+                market_price = internal_prices[iter_idx][p]
+
+                # Strategic profit for this round
+                strat_profit = internal_profits[iter_idx][p]
+
+                # Build row
                 row = {
                     "Iter": iter_idx + 1,
                     "Rnd": round_idx + 1,
                     "Strategic Player": f"G{p}",
-                    "Market Price": round(market_price, 3),
-                    "Strategic Profit": (
-                        round(internal_profits[p], 3)
-                        if internal_profits[p] is not None
-                        else None
-                    )
+                    "Market Price": round(market_price, 3) if market_price is not None else None,
+                    "Strategic Profit": round(strat_profit, 3) if strat_profit is not None else None,
                 }
 
-                # Bids for all generators
+                # Add bids for all generators
                 for g in range(num_g):
-                    row[f"Bid G{g}"] = (
-                        round(alphas[g], 3) if alphas[g] is not None else None
-                    )
+                    row[f"Bid G{g}"] = round(bids[g], 3) if bids[g] is not None else None
 
-                # Dispatch for all generators
+                # Add dispatch for all generators
                 for g in range(num_g):
-                    row[f"Dispatch G{g}"] = (
-                        round(dispatches[g], 3) if dispatches[g] is not None else None
-                    )
+                    row[f"Dispatch G{g}"] = round(dispatches[g], 3) if dispatches[g] is not None else None
 
                 rows.append(row)
+
+                round_counter += 1
 
         return pd.DataFrame(rows)
 
