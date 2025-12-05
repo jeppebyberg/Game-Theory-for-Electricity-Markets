@@ -1,14 +1,18 @@
 from Assignment_scripts.EPEC import EPEC
 import matplotlib.pyplot as plt
 from Assignment_scripts.Exe4_utils import generate_scaled_setup
+import os
 
-def run_multiple_player_setups(max_players: int, P_max_ref: list, cost_ref: list, demand_ref: float):   
+def run_multiple_player_setups(max_players: int, P_max_ref: list, cost_ref: list, demand_ref: float, segments: int):   
 
     epec_results = {}
 
     players_list = range(4, max_players + 1)
     convergence_rate = []
     worst_poa_list   = []
+    worst_poa_conv_list = []
+    highest_cci_list = []
+    highest_cci_conv_list = []
 
     for n_players in players_list:
         print(f"\n--- Running EPEC for {n_players} players ---")
@@ -23,19 +27,20 @@ def run_multiple_player_setups(max_players: int, P_max_ref: list, cost_ref: list
                     demand = demand, 
                     cost = cost, 
                     segments = segments, 
+                    exercise = "4_multi_players"
                     )
         
-        share_converged, worst_poa = epec.iterate_cost_combinations()
+        share_converged, worst_poa, worst_poa_conv, highest_cci, highest_cci_conv = epec.iterate_cost_combinations()
         convergence_rate.append(share_converged)
         worst_poa_list.append(worst_poa)
+        worst_poa_conv_list.append(worst_poa_conv)
+        highest_cci_list.append(highest_cci)
+        highest_cci_conv_list.append(highest_cci_conv)
         epec_results[n_players] = epec
-        if n_players == 4:
-            # Plot detailed results for 4 players only
-            for run_id in epec.results:
-                epec.plot_merit_order_curve(run_id = run_id)
-                epec.plot_clearing_price_over_iterations(run_id = run_id)
-            epec.plot_PoA()
-    
+
+        # Save merit order curve for each setup of players for run_id = 0 to show the merit order curve change with players
+        epec.plot_merit_order_curve(run_id = 0, num_players=n_players)
+
     # # --- Plot convergence rate vs number of players ---
     plt.figure(figsize=(8, 5))
     plt.plot(players_list, convergence_rate, marker='o')
@@ -44,21 +49,43 @@ def run_multiple_player_setups(max_players: int, P_max_ref: list, cost_ref: list
     # plt.title('EPEC Convergence Rate vs Number of Players')
     plt.grid(True)
     plt.tight_layout()
+    os.makedirs('Assignment_scripts/figures/4_multi_players', exist_ok=True)
+    plt.savefig('Assignment_scripts/figures/4_multi_players/convergence_rate_vs_players.png', dpi=300)
     plt.show()
+
     # # --- Plot worst PoA vs number of players ---
     plt.figure(figsize=(8, 5))
-    plt.plot(players_list, worst_poa_list, marker='o', color='orange')
+    plt.plot(players_list, worst_poa_list, marker='o', color='orange', label='All Runs')
+    plt.plot(players_list, worst_poa_conv_list, marker='o', color='red', label='Converged Runs')
     plt.xlabel('Number of Players')
     plt.ylabel('Worst Price of Anarchy (PoA)')
+    plt.legend(bbox_to_anchor=(0.5, -0.12), loc='upper center', 
+        ncol=4, framealpha=0.9, fontsize=10)
     # plt.title('Worst PoA vs Number of Players')
     plt.grid(True)
     plt.tight_layout()
+    os.makedirs('Assignment_scripts/figures/4_multi_players', exist_ok=True)
+    plt.savefig('Assignment_scripts/figures/4_multi_players/worst_poa_vs_players.png', dpi=300)
     plt.show()
-    return epec_results
+
+    # # --- Plot highest CCI vs number of players ---
+    plt.figure(figsize=(8, 5))
+    plt.plot(players_list, highest_cci_list, marker='o', color='green', label='All Runs')
+    plt.plot(players_list, highest_cci_conv_list, marker='o', color='darkred', label='Converged Runs')
+    plt.xlabel('Number of Players')
+    plt.ylabel('Highest Consumer Cost Inflation (CCI)')
+    plt.legend(bbox_to_anchor=(0.5, -0.12), loc='upper center', 
+        ncol=4, framealpha=0.9, fontsize=10)
+    # plt.title('Highest CCI vs Number of Players')
+    plt.grid(True)
+    plt.tight_layout()
+    os.makedirs('Assignment_scripts/figures/4_multi_players', exist_ok=True)
+    plt.savefig('Assignment_scripts/figures/4_multi_players/highest_cci_vs_players.png', dpi=300)
+    plt.show()
 
 if __name__ == "__main__":
     
-    # Exercise 3 and 4 setup
+    # 4 setup
     Pmin = [ 0,  0,  0,  0]
     Pmax = [55, 60, 65, 70]
 
@@ -66,11 +93,24 @@ if __name__ == "__main__":
 
     cost = [80, 100, 120, 140]
 
-    segments = 2
+    segments = 3
 
-    # Run multiple player setups
+    epec = EPEC(Pmin = Pmin, 
+                    Pmax = Pmax, 
+                    demand = demand, 
+                    cost = cost, 
+                    segments = segments, 
+                    exercise = "4"
+                    )
+    epec.iterate_cost_combinations()
+
+    for run_id in epec.results:
+        epec.plot_merit_order_curve(run_id = run_id)
+        epec.plot_clearing_price_over_iterations(run_id = run_id)
+
+    epec.plot_PoA()
+
+    # Run multiple player setups with only two segments
     max_players = 10
-    epec_results = run_multiple_player_setups(max_players=max_players, P_max_ref=Pmax, cost_ref=cost, demand_ref=demand)
-
-
-
+    segments = 2
+    run_multiple_player_setups(max_players=max_players, P_max_ref=Pmax, cost_ref=cost, demand_ref=demand, segments=segments)

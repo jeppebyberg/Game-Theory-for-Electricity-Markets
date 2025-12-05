@@ -4,29 +4,53 @@ import matplotlib.pyplot as plt
 import itertools
 import random
 import os
-from typing import List, Dict
-import csv
+from typing import List
 import pandas as pd
-from Assignment_scripts.config_loader import load_defaults
-
+from config_loader import load_defaults
 
 class EPEC:
+    """
+    Main class for this assignment - implements the EPEC model and the best response algorithm for all of the exercises
+
+    Parameters
+    -------
+    Pmin : List[float]  
+        Minimum generation limits for each generator.
+    Pmax : List[float]
+        Maximum generation limits for each generator.
+    demand : float
+        System demand.
+    cost : List[float]
+        True cost of each generator.
+    segments : int, optional
+        Number of segments for cost discretization (default is None).
+    exercise : str, optional
+        Exercise identifier for logging purposes (default is "3").
+    max_iter : int, optional
+        Maximum number of iterations for the best response algorithm (default is None, which means use the value from defaults.yaml).
+    """
+
     def __init__(self,  
                  Pmin: List[float], Pmax: List[float], 
                  demand: float,
                  cost: List[float], 
                  segments: int = None,
-                 exercise: str = "3"
+                 exercise: str = "3",
+                 max_iter: int = None,
                 ):
 
         # Load and assign algorithm parameters from defaults.yaml
-        d = load_defaults("Assignment_scripts/defaults.yaml")
+        # d = load_defaults("Assignment_scripts/defaults.yaml")
+        d = load_defaults("defaults.yaml")
 
         self.alpha_min       = d["alpha_min"]
         self.alpha_max       = d["alpha_max"]
-        self.max_iter        = d["max_iter"]
         self.convergence_tol = d["convergence_tol"]
         self.heuristic       = d["heuristic"]
+        if max_iter is not None:
+            self.max_iter    = max_iter
+        else:
+            self.max_iter    = d["max_iter"]
 
         self.exercise = exercise
 
@@ -43,12 +67,14 @@ class EPEC:
 
         self.true_cost = [float(c) for c in cost] # True costs of each generator
         if segments is not None:
-            cost_max = [c * 2 for c in self.true_cost] # Define maximum cost as double the true cost
+            cost_max = [c * 2.49 for c in self.true_cost] # Define maximum cost as 2.49 times the true cost, to ensure there is no quest equivalent to others
             # Create cost discretization for each generator
             self.cost = np.array([
                 np.linspace(self.true_cost[i], cost_max[i], self.segments)
                 for i in range(self.num_generators)
             ])
+        else:
+            self.cost = np.array([self.true_cost[i] for i in range(self.num_generators)])
 
         assert len(Pmax) == self.num_generators, "Pmax length must match number of generators"
         assert len(cost) == self.num_generators, "Cost length must match number of generators"
@@ -78,9 +104,14 @@ class EPEC:
         -------
         share_converged : float
             Percentage of runs that converged.
-        -------
         worst_poa : float
             Worst Price of Anarchy (PoA) observed among all runs.
+        worst_poa_conv : float
+            Worst Price of Anarchy (PoA) observed among converged runs.
+        highest_cci : float
+            Highest Consumer Cost Inflation (CCI) observed among all runs.
+        highest_cci_conv : float
+            Highest Consumer Cost Inflation (CCI) observed among converged runs.
         """
 
         # all combinations of cost vectors (Cartesian product)
@@ -118,7 +149,27 @@ class EPEC:
         )
 
         print(f"Worst PoA: {worst_poa:.2f} (from run id {worst_id})")
-        return share_converged, worst_poa
+
+        highest_id, highest_cci = max(
+            ((id, res['CCI']) for id, res in self.results.items()),
+            key=lambda x: x[1]
+        )
+        print(f"Highest CCI: {highest_cci:.2f} (from run id {highest_id})")
+
+        # Find the worst PoA among converged runs
+        worst_id_conv, worst_poa_conv = max(
+            ((id, res['PoA']) for id, res in self.results.items() if res['converged']),
+            key=lambda x: x[1]
+        )
+        print(f"Worst PoA among converged runs: {worst_poa_conv:.2f} (from run id {worst_id_conv})")
+
+        highest_id_conv, highest_cci_conv = max(
+            ((id, res['CCI']) for id, res in self.results.items() if res['converged']),
+            key=lambda x: x[1]
+        )
+        print(f"Highest CCI among converged runs: {highest_cci_conv:.2f} (from run id {highest_id_conv})")
+
+        return share_converged, worst_poa, worst_poa_conv, highest_cci, highest_cci_conv
 
     def run_best_response(self, cost_vector: List[float], run_id: int) -> None:
         """
@@ -290,8 +341,8 @@ class EPEC:
         # Calculate Price of Anarchy (PoA)
         PoA = sum(cost_vector[g] * dispatch_history[iter][g] for g in range(self.num_generators)) / (sum(cost_vector[g] * dispatch_ED[g] for g in range(self.num_generators)))
 
-        # Calculate alternative PoA definition based on bids
-        PoA_ish = sum(bid_vector[g] * dispatch_history[iter][g] for g in range(self.num_generators)) / (sum(cost_vector[g] * dispatch_ED[g] for g in range(self.num_generators)))
+        # Calculate consumer inflation cost CCI 
+        CCI = clearing_price_history[-1] * self.demand / (clearing_price_ED * self.demand)
 
         final_bid = bid_vector.copy()
         final_dispatch = dispatch_round
@@ -315,11 +366,11 @@ class EPEC:
                         "dispatch_ED": dispatch_ED,
                         "clearing_price_ED": clearing_price_ED,
                         "PoA": PoA,
-                        "PoA_ish": PoA_ish,
+                        "CCI": CCI,
                         "converged": converged,
                     }
 
-    def iterate_ownership_combinations(self, ownership_size: int = 2) -> tuple[float, float]:
+    def iterate_ownership_combinations(self, ownership_size: int = 2) -> tuple[float, float, float]:
         """
         Function used for exercise 5
         - Iterate over all ownership combinations where one player "ownership_size" generators.
@@ -337,7 +388,8 @@ class EPEC:
             Percentage of runs that converged.
         worst_poa : float
             Worst Price of Anarchy (PoA) observed among all runs.
-
+        worst_poa_conv : float
+            Worst Price of Anarchy (PoA) observed among converged runs.
         """
 
         # Ownership combinations
@@ -368,17 +420,19 @@ class EPEC:
             key=lambda x: x[1]
         )
         
-        # #convert results to csv
-        # os.makedirs("outputs/ownership_results", exist_ok=True)
-        # file_path = os.path.join("outputs/ownership_results", f"results_{self.demand}_{self.num_generators}_{self.alpha_min}.csv")
-        # with open(file_path, "w", newline="") as f:
-        #     writer = csv.writer(f)
-        #     writer.writerow(["Key", "Value"])
-        #     for key, value in self.results.items():
-        #         writer.writerow([key, value])
+        # Extract converged results
+        converged_items = [(id, res['PoA']) for id, res in self.results.items() if res['converged']]
+
+        if converged_items:
+            worst_id_conv, worst_poa_conv = max(converged_items, key=lambda x: x[1])
+        else:
+            print("No converged runs in this experiment.")
+            worst_id_conv, worst_poa_conv = None, None
 
         print(f"Worst PoA: {worst_poa:.2f} (from run id {worst_id})")
-        return share_converged, worst_poa
+        if worst_poa_conv is not None:
+            print(f"Worst PoA among converged runs: {worst_poa_conv:.2f} (from run id {worst_id_conv})")
+        return share_converged, worst_poa, worst_poa_conv
 
     def run_best_response_ownership(self, owner_indexes: tuple[int], run_id: int) -> None:
         """
@@ -467,6 +521,9 @@ class EPEC:
                 internal_actor_profit_history[iter][actor_to_index[p]] = -value(self.model.objective)
                 dispatch_history[iter][g] = self.model.P_G[g].value
 
+            # Store clearing price for this iteration after all players have acted
+            clearing_price_history.append(self.model.lambda_dual.value)
+
             # After the first 5 iterations, check for convergence
             if iter > 4:
                 # First convergence check - after each player has acted
@@ -516,9 +573,6 @@ class EPEC:
                     if all(convergence_check_2[iter]):
                         print(f"Run id: {run_id} - Converged after {iter} full rounds.")
                         converged = True
-                        print(f"  Owner profit: ${actor_profit_history[iter][actor_to_index[tuple(owner_indexes)]]:.2f}")
-                        print(f"  Competitor profits: {[actor_profit_history[iter][i] for i in range(1, num_actors)]}")
-                        print(f"  Owner share of total profit: {100 * actor_profit_history[iter][actor_to_index[tuple(owner_indexes)]] / sum(actor_profit_history[iter]):.2f}%")
                         break
                 # If the algorithm has not converged pass to the next iteration
                 else:
@@ -526,14 +580,27 @@ class EPEC:
                     if iter == self.max_iter - 1:
                         dispatch_round, clearing_price_round = self.economic_dispatch(bid_vector)
                         dispatch_history[iter] = dispatch_round
-                        clearing_price_history.append(clearing_price_round)
-                        for j in range(self.num_generators):
-                            actor_profit_history[iter][j] = (
-                                clearing_price_round * dispatch_round[j]
-                                - cost_vector[j] * dispatch_round[j]
-                            )
+                        # For each player, calculate and store profit after market clearing
+                        for p in players:
+                            # Calculate profit for the actor
+                            if isinstance(p, (list, tuple, set)):
+                                profit_market_clearing = sum(
+                                    clearing_price_round * dispatch_round[g]
+                                    - cost_vector[g] * dispatch_round[g]
+                                    for g in p
+                                )
+                            else:
+                                profit_market_clearing = (
+                                    clearing_price_round * dispatch_round[p]
+                                    - cost_vector[p] * dispatch_round[p]
+                                )
+                            
+                            # Store the profit after market clearing
+                            actor_profit_history[iter][actor_to_index[p]] = profit_market_clearing
+
             # Update iteration counter
             iter += 1
+            
             # If maximum iterations reached without convergence, store last dispatch
             if iter == self.max_iter:
                 print(f"Run id: {run_id} - Reached maximum iterations {self.max_iter} without convergence.")
@@ -541,8 +608,9 @@ class EPEC:
 
         # Calculate Price of Anarchy (PoA)
         PoA = sum(cost_vector[g] * dispatch_history[iter][g] for g in range(self.num_generators)) / (sum(cost_vector[g] * dispatch_ED[g] for g in range(self.num_generators)))
-        # Calculate alternative PoA definition based on bids
-        PoA_ish = sum(bid_vector[g] * dispatch_history[iter][g] for g in range(self.num_generators)) / (sum(cost_vector[g] * dispatch_ED[g] for g in range(self.num_generators)))
+
+        # Calculate the consumer cost inflation 
+        CCI = clearing_price_history[-1] * self.demand / (clearing_price_ED * self.demand)
 
         # Store final bids and dispatch
         final_bid = bid_vector.copy()
@@ -550,13 +618,14 @@ class EPEC:
 
         # Store results in the results dictionary
         self.results[run_id] = {
+                        "owner_indexes": owner_indexes,
                         "cost_vector": cost_vector,
                         "profit_history": internal_actor_profit_history,
                         "alpha_history": alpha_history,
                         "dispatch_history": dispatch_history,
                         "iterations": iter,
                         "PoA": PoA,
-                        "PoA_ish": PoA_ish,
+                        "CCI": CCI,
                         "final_dispatch": final_dispatch,
                         "final_bid": final_bid,
                         "final_clearing_price": clearing_price_history[-1],
@@ -756,7 +825,7 @@ class EPEC:
         solver = SolverFactory(solver_name)
 
         # Solve
-        results = solver.solve(self.model, tee=False)
+        results = solver.solve(self.model, tee=True)
 
         # Check solver status
         if not (results.solver.status == 'ok') and not (results.solver.termination_condition == 'optimal'):
@@ -788,6 +857,29 @@ class EPEC:
         dispatch = [self.model.P_G[i].value for i in range(self.num_generators)]
         clearing_price = self.model.lambda_dual.value
         alpha_values = {i: self.model.alpha[i].value for i in self.model.strategic_index}
+
+        #Comparison to the economic dispatch
+        dispatch_ED, clearing_price_ED = self.economic_dispatch(cost_vector)
+        profit_ED = sum(
+            clearing_price_ED * dispatch_ED[i] - cost_vector[i] * dispatch_ED[i]
+            for i in self.model.strategic_index)
+        
+        print("Economic Dispatch profit of strategic player:", profit_ED)
+        print("Profit of strategic player:", -value(self.model.objective))
+
+        print("Difference in profit:", -value(self.model.objective) - profit_ED)
+
+        PoA = sum(cost_vector[g] * dispatch[g] for g in range(self.num_generators)) / (sum(cost_vector[g] * dispatch_ED[g] for g in range(self.num_generators)))
+        print("Price of Anarchy (PoA):", PoA)
+        print("Numerator: ", sum(cost_vector[g] * dispatch[g] for g in range(self.num_generators)))
+        print("Denominator: ", sum(cost_vector[g] * dispatch_ED[g] for g in range(self.num_generators)))
+
+         # Calculate the consumer cost inflation
+        CCI = clearing_price * self.demand / (clearing_price_ED * self.demand)
+        print("Consumer Cost Inflation (CCI):", CCI)
+        print("Numerator: ", clearing_price * self.demand)
+        print("Denominator: ", clearing_price_ED * self.demand)
+
         return dispatch, clearing_price, alpha_values
 
     def economic_dispatch(self, cost_vector: List[float]) -> tuple[List[float], float]:
@@ -832,7 +924,7 @@ class EPEC:
             print("Solver status:", results.solver.status)
             print("Termination condition:", results.solver.termination_condition)
     
-    def plot_merit_order_curve(self, run_id: int) -> None:
+    def plot_merit_order_curve(self, run_id: int, num_players: int = None) -> None:
         """
         Plot the merit order curve for both the economic dispatch and the strategic producer case for a given run_id.
         Saves the plot as a PNG file in the outputs/{exercise}/merit_order_curves/ directory.
@@ -973,8 +1065,12 @@ class EPEC:
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.subplots_adjust(bottom=0.25)
-        os.makedirs(f"Assignment_scripts/figures/{self.exercise}/merit_order", exist_ok=True)
-        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/merit_order/merit_order_curve_run_{run_id}.png', dpi=300)
+        if num_players is not None:
+            os.makedirs(f"Assignment_scripts/figures/{self.exercise}/merit_order/num_players_{num_players}", exist_ok=True)
+            plt.savefig(f'Assignment_scripts/figures/{self.exercise}/merit_order/num_players_{num_players}/merit_order_curve_run_{run_id}.png', dpi=300)
+        else:
+            os.makedirs(f"Assignment_scripts/figures/{self.exercise}/merit_order", exist_ok=True)
+            plt.savefig(f'Assignment_scripts/figures/{self.exercise}/merit_order/merit_order_curve_run_{run_id}.png', dpi=300)
         # plt.show()
         plt.close()
 
@@ -996,12 +1092,13 @@ class EPEC:
         alpha_history = np.array(alpha_history)
         plt.figure(figsize=(10, 6))
         for i in range(self.num_generators):
-            plt.plot(alpha_history[:, i], marker='o', label=f'Generator {i} - Init Cost {cost_vector[i]:.0f}')
+            plt.plot(alpha_history[:, i], marker='o', label = f'Generator {i}')
         plt.xlabel('Iteration')
-        plt.ylabel('Alpha (Bid)')
+        plt.ylabel('Bid $/MWh')
         # plt.title('Alpha Evolution Over Iterations')
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.grid(True)
+        plt.legend(bbox_to_anchor=(0.5, -0.12), loc='upper center', 
+                ncol=4, framealpha=0.9, fontsize=10)
+        plt.grid(True, alpha=0.3)
         plt.tight_layout()
         os.makedirs(f"Assignment_scripts/figures/{self.exercise}/alpha", exist_ok=True)
         plt.savefig(f'Assignment_scripts/figures/{self.exercise}/alpha/alpha_evolution_run_{run_id}.png', dpi=300)
@@ -1022,12 +1119,11 @@ class EPEC:
 
         clearing_price_history = np.array(clearing_price_history)
         plt.figure(figsize=(10, 6))
-        plt.plot(clearing_price_history, marker='o', label=f'Clearing Price')
+        plt.plot(clearing_price_history, marker='o')
         plt.xlabel('Iteration')
-        plt.ylabel('Clearing Price')
+        plt.ylabel('$/MWh')
         # plt.title('Clearing Price Evolution Over Iterations')
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.grid(True)
+        plt.grid(True, alpha=0.3)
         plt.tight_layout()
         os.makedirs(f"Assignment_scripts/figures/{self.exercise}/clearing_price", exist_ok=True)
         plt.savefig(f'Assignment_scripts/figures/{self.exercise}/clearing_price/clearing_price_evolution_run_{run_id}.png', dpi=300)
@@ -1091,13 +1187,13 @@ class EPEC:
         x = np.arange(num_g)
         width = 0.35
 
-        plt.figure(figsize=(12, 6))
+        plt.figure(figsize=(10, 6))
         plt.bar(x - width/2, dispatch_ED, width, label="Economic Dispatch (ED)", color="seagreen")
         plt.bar(x + width/2, dispatch_SP, width, label="Equilibrium Dispatch (SP)", color="purple")
 
         plt.xlabel("Generator")
         plt.ylabel("Dispatch (MW)")
-        plt.title("Dispatch Comparison: Economic vs Equilibrium")
+        # plt.title("Dispatch Comparison: Economic vs Equilibrium")
 
         plt.xticks(x, generators)
         plt.legend()
@@ -1110,7 +1206,7 @@ class EPEC:
 
     def plot_PoA(self) -> None:
         """
-        Plot the distributions of Price of Anarchy (PoA) and Improved PoA (PoA_ish) across all runs.
+        Plot the distributions of Price of Anarchy (PoA) and CCI across all runs.
         Saves the plot as a PNG file in the outputs/{exercise}/PoA/ directory.
         """
 
@@ -1125,56 +1221,57 @@ class EPEC:
             for run_id in self.results
         ]
 
-        PoA_ish_values_converged = [
-            self.results[run_id]['PoA_ish']
+        CCI_values_converged = [
+            self.results[run_id]['CCI']
             for run_id in self.results
             if self.results[run_id]['converged']
         ]
 
-        PoA_ish_values = [
-            self.results[run_id]['PoA_ish']
+        CCI_values = [
+            self.results[run_id]['CCI']
             for run_id in self.results
         ]
 
         # --- Compute equal-width global bins ---
-        all_min = min(min(PoA_values), min(PoA_ish_values))
-        all_max = max(max(PoA_values), max(PoA_ish_values))
-        n_bins = 20
+        min_val_poa = 1
+        max_val_poa = max(PoA_values)
 
-        bins = np.linspace(all_min, all_max, n_bins + 1)
+        min_val_cci = 1
+        max_val_cci = max(CCI_values)
 
-        # --- Create subplots ---
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+        bins_poa = np.linspace(1, max_val_poa, 25)
+        bins_cci = np.linspace(1, max_val_cci, 25)
 
-        # -------------------------------------------------------
-        # Left subplot: PoA
-        # -------------------------------------------------------
-        ax = axes[0]
-        ax.hist(PoA_values, bins=bins, color='lightgray', edgecolor='black', label='All Runs')
-        ax.hist(PoA_values_converged, bins=bins, color='skyblue', edgecolor='black', alpha=0.5, label='Converged Runs')
+        # --- Create PoA plot ---
+        plt.figure(figsize=(10, 6))
+        plt.hist(PoA_values, bins=bins_poa, color='lightgray', edgecolor='black', label='All Runs')
+        plt.hist(PoA_values_converged, bins=bins_poa, color='skyblue', edgecolor='black', alpha=0.5, label='Converged Runs')
+        plt.xlim(min_val_poa, max_val_poa)
 
-        ax.set_xlabel('Price of Anarchy (PoA)')
-        ax.set_ylabel('Frequency')
-        # ax.set_title('PoA Distribution')
-        ax.grid(True)
-        ax.legend()
+        plt.xlabel('Price of Anarchy (PoA)')
+        plt.ylabel('Frequency')
+        plt.grid(True)
+        plt.legend()
 
-        # -------------------------------------------------------
-        # Right subplot: PoA-ish
-        # -------------------------------------------------------
-        ax = axes[1]
-        ax.hist(PoA_ish_values, bins=bins, color='lightgray', edgecolor='black', label='All Runs')
-        ax.hist(PoA_ish_values_converged, bins=bins, color='skyblue', edgecolor='black', alpha=0.5, label='Converged Runs')
-
-        ax.set_xlabel('Improved PoA (PoA_ish)')
-        # ax.set_title('Improved PoA Distribution')
-        ax.grid(True)
-        ax.legend()
-
-        # --- Layout ---
-        fig.tight_layout()
         os.makedirs(f"Assignment_scripts/figures/{self.exercise}/PoA", exist_ok=True)
-        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/PoA/PoA_distributions.png', dpi=300)
+        plt.tight_layout()
+        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/PoA/PoA_distribution.png', dpi=300)
+        plt.close()
+
+        # --- Create CCI plot ---
+        plt.figure(figsize=(10, 6))
+
+        plt.hist(CCI_values, bins=bins_cci, color='lightgray', edgecolor='black', label='All Runs')
+        plt.hist(CCI_values_converged, bins=bins_cci, color='skyblue', edgecolor='black', alpha=0.5, label='Converged Runs')
+        plt.xlim(min_val_cci, max_val_cci)
+
+        plt.xlabel('Consumer Cost Inflation (CCI)')
+        plt.ylabel('Frequency')
+        plt.grid(True)
+        plt.legend()
+
+        plt.tight_layout()
+        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/PoA/CCI_distribution.png', dpi=300)
         plt.close()
 
     def plot_profits(self, run_id: int) -> None:
@@ -1227,102 +1324,123 @@ class EPEC:
         plt.close()
         # plt.show()
 
-    def plot_actor_profits(self, run_id: int) -> None:
-        """
-        Plot actor-level profits over iterations for ownership scenarios.
-        Shows the owner's combined profit and each competitor's individual profit.
-        Saves the plot as a PNG file in the outputs/{exercise}/actor_profits/ directory.
+    # def plot_actor_profits(self, run_id: int) -> None:
+    #     """
+    #     Plot actor-level profits over iterations for ownership scenarios.
+    #     Shows the owner's combined profit and each competitor's individual profit.
+    #     Saves the plot as a PNG file in the outputs/{exercise}/actor_profits/ directory.
 
-        Parameters
-        ----------
-        run_id : int
-            Identifier for the run/experiment to plot.
-        """
-        if "owner_indexes" not in self.results[run_id]:
-            print(f"Run {run_id} is not an ownership scenario. Use plot_profits() instead.")
-            return
+    #     Parameters
+    #     ----------
+    #     run_id : int
+    #         Identifier for the run/experiment to plot.
+    #     """
+    #     if "owner_indexes" not in self.results[run_id]:
+    #         print(f"Run {run_id} is not an ownership scenario. Use plot_profits() instead.")
+    #         return
         
-        owner_indexes = self.results[run_id]['owner_indexes']
-        profit_history = self.results[run_id]['profit_history']
-        iterations = self.results[run_id]['iterations']
+    #     owner_indexes = self.results[run_id]['owner_indexes']
+    #     profit_history = self.results[run_id]['profit_history']
+    #     iterations = self.results[run_id]['iterations']
         
-        # Calculate actor profits for each iteration
-        actor_profit_history = []
+    #     # all competitors = those not owned
+    #     competitors = [i for i in range(self.num_generators) if i not in owner_indexes]
+
+    #     # actor list: owner coalition first, then each competitor
+    #     actors = [owner_indexes] + competitors
+
+    #     # mapping from actor → index in profit_history rows
+    #     actor_to_index = {actor: idx for idx, actor in enumerate(actors)}
+
+    #     # Calculate actor profits for each iteration
+    #     actor_profit_history = []
         
-        for iter_profits in profit_history:
-            # Owner profit: sum of all owned generators
-            owner_profit = sum(iter_profits[g] for g in owner_indexes if iter_profits[g] is not None)
-            
-            # Competitor profits: individual generators not owned
-            competitor_profits = [
-                iter_profits[g] for g in range(self.num_generators) 
-                if g not in owner_indexes and iter_profits[g] is not None
-            ]
-            
-            actor_profit_history.append([owner_profit] + competitor_profits)
-        
-        # Transpose to get profit trajectories per actor
-        num_iters = len(actor_profit_history)
-        num_actors = len(actor_profit_history[0])
-        
-        actor_trajectories = []
-        for actor_idx in range(num_actors):
-            trajectory = [actor_profit_history[iter_idx][actor_idx] 
-                        for iter_idx in range(num_iters)]
-            actor_trajectories.append(trajectory)
-        
-        # Create the plot
-        plt.figure(figsize=(12, 7))
-        
-        # Plot owner profit (Actor 0)
-        owned_gens = ', '.join([f'G{i}' for i in sorted(owner_indexes)])
-        plt.plot(range(1, num_iters + 1), actor_trajectories[0], 
-                marker='o', linewidth=2.5, markersize=8, 
-                label=f'Owner (owns {owned_gens})', 
-                color='red', linestyle='-', alpha=0.8)
-        
-        # Plot competitor profits (Actors 1+)
-        competitors = [i for i in range(self.num_generators) if i not in owner_indexes]
-        colors = plt.cm.tab10(range(len(competitors)))
-        
-        for actor_idx in range(1, num_actors):
-            gen_idx = competitors[actor_idx - 1]
-            plt.plot(range(1, num_iters + 1), actor_trajectories[actor_idx], 
-                    marker='s', linewidth=2, markersize=6, 
-                    label=f'Competitor G{gen_idx}', 
-                    color=colors[actor_idx - 1], linestyle='--', alpha=0.7)
-        
-        conv_iter = iterations if self.results[run_id]['converged'] else None
-        
-        # Formatting
-        plt.xlabel('Iteration', fontsize=13, fontweight='bold')
-        plt.ylabel('Profit ($)', fontsize=13, fontweight='bold')
-        conv_text = f' (Converged at iteration {conv_iter})' if conv_iter else ' (Did not converge)'
-        # plt.title(f'Actor Profits Over Iterations - Run ID: {run_id}{conv_text}\n'
-        #         f'Owner controls: {owned_gens}', 
-        #         fontsize=14, fontweight='bold')
-        plt.legend(bbox_to_anchor=(0.5, -0.15), loc='upper center', 
-          fontsize=10, framealpha=0.9, ncol=3)
-        plt.grid(True, alpha=0.3, linestyle='--')
-        
-        # Add summary statistics box
-        final_owner_profit = actor_trajectories[0][-1]
-        total_competitor_profit = sum(traj[-1] for traj in actor_trajectories[1:])
-        
-        textstr = f'Final Profits:\n'
-        textstr += f'Owner: ${final_owner_profit:.2f}\n'
-        textstr += f'All Competitors: ${total_competitor_profit:.2f}\n'
-        textstr += f'Owner Share: {final_owner_profit/(final_owner_profit+total_competitor_profit)*100:.1f}%'
-        
-        props = dict(boxstyle='round', facecolor='wheat', alpha=0.8, edgecolor='black', linewidth=1.5)
-        plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes, 
-                fontsize=10, verticalalignment='top', bbox=props)
-        
-        plt.tight_layout()
-        plt.subplots_adjust(bottom=0.25)
-        os.makedirs(f"Assignment_scripts/figures/{self.exercise}/actor_profits", exist_ok=True)
-        plt.savefig(f'Assignment_scripts/figures/{self.exercise}/actor_profits/actor_profits_run_{run_id}.png', dpi=300)
-        plt.close()
+    #     for iter_profits in profit_history:
+    #         profits_this_iter = []
+
+    #         # owner (actor 0)
+    #         owner_actor_idx = actor_to_index[owner_indexes]
+    #         owner_profit = iter_profits[owner_actor_idx]
+    #         profits_this_iter.append(owner_profit)
+
+    #         # competitors follow in actors list from index 1 onward
+    #         for comp in competitors:
+    #             comp_actor_idx = actor_to_index[comp]
+    #             profits_this_iter.append(iter_profits[comp_actor_idx])
+
+    #         actor_profit_history.append(profits_this_iter)
+
+    #     # transpose for plotting
+    #     num_iters = len(actor_profit_history)
+    #     num_actors = len(actor_profit_history[0])
+    #     actor_trajectories = [
+    #         [actor_profit_history[t][a] for t in range(num_iters)]
+    #         for a in range(num_actors)
+    #     ]
+
+    #     # ---------------------------------------------------------
+    #     # Plot
+    #     # ---------------------------------------------------------
+    #     plt.figure(figsize=(12, 7))
+
+    #     owned_gens = ", ".join([f"G{i}" for i in sorted(owner_indexes)])
+
+    #     # Owner trajectory
+    #     plt.plot(
+    #         range(1, num_iters + 1),
+    #         actor_trajectories[0],
+    #         marker='o',
+    #         linewidth=2.5,
+    #         markersize=8,
+    #         label=f'Owner (owns {owned_gens})',
+    #         color='red',
+    #         linestyle='-',
+    #         alpha=0.8
+    #     )
+
+    #     # Competitors
+    #     colors = plt.cm.tab10(range(len(competitors)))
+
+    #     for idx, g in enumerate(competitors, start=1):
+    #         plt.plot(
+    #             range(1, num_iters + 1),
+    #             actor_trajectories[idx],
+    #             marker='s',
+    #             linewidth=2,
+    #             markersize=6,
+    #             label=f'Competitor G{g}',
+    #             color=colors[idx - 1],
+    #             linestyle='--',
+    #             alpha=0.7
+    #         )
+
+    #     # formatting
+    #     plt.xlabel("Iteration", fontsize=13, fontweight='bold')
+    #     plt.ylabel("Profit ($)", fontsize=13, fontweight='bold')
+    #     plt.grid(True, alpha=0.3, linestyle='--')
+    #     plt.legend(bbox_to_anchor=(0.5, -0.15), loc='upper center', fontsize=10, ncol=3)
+
+    #     # Summary box
+    #     final_owner_profit = actor_trajectories[0][-1]
+    #     total_competitor_profit = sum(traj[-1] for traj in actor_trajectories[1:])
+
+    #     textstr = (
+    #         f"Final Profits:\n"
+    #         f"Owner: ${final_owner_profit:.2f}\n"
+    #         f"All Competitors: ${total_competitor_profit:.2f}\n"
+    #         f"Owner Share: {100 * final_owner_profit / (final_owner_profit + total_competitor_profit):.1f}%"
+    #     )
+
+    #     props = dict(boxstyle='round', facecolor='wheat', alpha=0.8, edgecolor='black')
+    #     plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes,
+    #             fontsize=10, verticalalignment='top', bbox=props)
+
+    #     plt.tight_layout()
+    #     plt.subplots_adjust(bottom=0.25)
+
+    #     os.makedirs(f"Assignment_scripts/figures/{self.exercise}/actor_profits", exist_ok=True)
+    #     plt.savefig(f"Assignment_scripts/figures/{self.exercise}/actor_profits/actor_profits_run_{run_id}.png", dpi=300)
+    #     plt.close()
 
     def plot_merit_order_from_MPEC(self, strategic_index: int, cost_vector: List[float]) -> None:
         """
@@ -1482,32 +1600,55 @@ if __name__ == "__main__":
     
     # Exercise 2
 
-    Pmin = [ 0,  0,  0,  0]
-    Pmax = [60, 80, 55, 70]
+    # Pmin = [ 0,  0,  0,  0]
+    # Pmax = [60, 80, 55, 70]
 
-    demand = 150
+    # demand = 150
 
-    cost = [200, 300, 400, 500]
+    # cost = [200, 300, 400, 500]
+
+    # # Run single experiment - exercise 3
+    # epec = EPEC(
+    #             Pmin = Pmin, 
+    #             Pmax = Pmax, 
+    #             demand = demand, 
+    #             cost = cost,
+    # )
+
+    # epec.plot_merit_order_from_MPEC(strategic_index=0, cost_vector=cost)
+
+    # demand = 190
+
+    # # Run single experiment - exercise 3
+    # epec = EPEC(
+    #             Pmin = Pmin, 
+    #             Pmax = Pmax, 
+    #             demand = demand, 
+    #             cost = cost,
+    # )
+
+    # epec.plot_merit_order_from_MPEC(strategic_index=0, cost_vector=cost)
+
+        # Exercise 5
+    Pmin = [ 0,  0,  0,  0,  0,  0,  0]
+    Pmax = [30, 30, 30, 30, 30, 30, 30]
+
+    cost = [1, 1.5, 2.5, 24, 25, 27.5, 29]
+
+    demand = 145
 
     # Run single experiment - exercise 3
     epec = EPEC(
-                Pmin = Pmin, 
-                Pmax = Pmax, 
-                demand = demand, 
-                cost = cost,
+        Pmin = Pmin, 
+        Pmax = Pmax, 
+        demand = demand, 
+        cost = cost,
+        exercise = "5"
     )
 
-    epec.plot_merit_order_from_MPEC(strategic_index=0, cost_vector=cost)
+    epec.iterate_ownership_combinations(2)
 
-    demand = 190
-
-    # Run single experiment - exercise 3
-    epec = EPEC(
-                Pmin = Pmin, 
-                Pmax = Pmax, 
-                demand = demand, 
-                cost = cost,
-    )
-
-    epec.plot_merit_order_from_MPEC(strategic_index=0, cost_vector=cost)
+    for run_id in epec.results:
+        epec.plot_merit_order_curve(run_id = run_id)
+        epec.plot_clearing_price_over_iterations(run_id = run_id)
 
